@@ -2,7 +2,7 @@
   "name": "vss-bridge",
   "displayName": "VSS Bridge (Visual SourceSafe)",
   "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands. Developed by Moiz Bohra.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "MoizBohra",
   "author": {
     "name": "Moiz Bohra"
@@ -82,11 +82,36 @@
         },
         "vssBridge.ignoredFileTypes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [
-            "exe", "dll", "pdb", "obj", "bin", "cache", "suo", "ncb", "sdf",
-            "opensdf", "log", "tmp", "zip", "rar", "7z", "png", "jpg", "jpeg",
-            "gif", "bmp", "ico", "pdf", "mp3", "mp4", "avi", "wav"
+            "exe",
+            "dll",
+            "pdb",
+            "obj",
+            "bin",
+            "cache",
+            "suo",
+            "ncb",
+            "sdf",
+            "opensdf",
+            "log",
+            "tmp",
+            "zip",
+            "rar",
+            "7z",
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "bmp",
+            "ico",
+            "pdf",
+            "mp3",
+            "mp4",
+            "avi",
+            "wav"
           ],
           "description": "File extensions that should never trigger the View/Checkout prompt (binaries, build outputs, media)."
         },
@@ -219,6 +244,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://example.invalid/vss-bridge"
+    "url": "https://github.com/moizbohra52/vss-bridge.git"
   }
 }
