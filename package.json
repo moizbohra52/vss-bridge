@@ -1,0 +1,224 @@
+{
+  "name": "vss-bridge",
+  "displayName": "VSS Bridge (Visual SourceSafe)",
+  "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands. Developed by Moiz Bohra.",
+  "version": "0.1.8",
+  "publisher": "MoizBohra",
+  "author": {
+    "name": "Moiz Bohra"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "vss",
+    "sourcesafe",
+    "visual sourcesafe",
+    "checkout",
+    "checkin",
+    "scm"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "icon": "icon.png",
+  "contributes": {
+    "configuration": {
+      "title": "VSS Bridge (Visual SourceSafe)",
+      "properties": {
+        "vssBridge.ssExePath": {
+          "type": "string",
+          "default": "C:\\Program Files (x86)\\Microsoft Visual SourceSafe\\ss.exe",
+          "description": "Full path to ss.exe (Visual SourceSafe command line utility). Example: C:\\Program Files (x86)\\Microsoft Visual SourceSafe\\ss.exe"
+        },
+        "vssBridge.databasePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the FOLDER that contains srcsafe.ini of your VSS database (this becomes the SSDIR environment variable). Example: \\\\vssserver\\vss\\  or  D:\\VSS\\MyDatabase"
+        },
+        "vssBridge.username": {
+          "type": "string",
+          "default": "",
+          "description": "VSS username used for checkout / checkin operations."
+        },
+        "vssBridge.password": {
+          "type": "string",
+          "default": "",
+          "description": "VSS password. WARNING: stored in plain text in settings.json. Prefer workspace settings and protect the file, or leave empty if your account has no password."
+        },
+        "vssBridge.vssProject": {
+          "type": "string",
+          "default": "$/",
+          "description": "VSS project path mapped to the first workspace folder. Example: $/MyProject/webapp/api - so that C:\\dev\\api\\test.php maps to $/MyProject/webapp/api/test.php"
+        },
+        "vssBridge.mappings": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "local": {
+                "type": "string",
+                "description": "Local folder, relative to the workspace folder (e.g. webapp\\\\api) or an absolute path"
+              },
+              "vss": {
+                "type": "string",
+                "description": "VSS project it maps to (e.g. $/MyProject/webapp/api)"
+              }
+            }
+          },
+          "description": "Folder-level VSS mappings for when the local folder layout does not mirror the VSS tree. Deepest match wins; everything else uses vssBridge.vssProject. Example: [ { \"local\": \"webapp\\\\api\", \"vss\": \"$/MyProject/webapp/api\" } ]"
+        },
+        "vssBridge.promptOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "When you open a file, ask 'Check Out or View only?' (Dreamweaver style). Files that are already checked out by you are skipped automatically."
+        },
+        "vssBridge.ignoredFileTypes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [
+            "exe", "dll", "pdb", "obj", "bin", "cache", "suo", "ncb", "sdf",
+            "opensdf", "log", "tmp", "zip", "rar", "7z", "png", "jpg", "jpeg",
+            "gif", "bmp", "ico", "pdf", "mp3", "mp4", "avi", "wav"
+          ],
+          "description": "File extensions that should never trigger the View/Checkout prompt (binaries, build outputs, media)."
+        },
+        "vssBridge.autoGetWhenMissing": {
+          "type": "boolean",
+          "default": true,
+          "description": "If the local file does not exist yet (fresh workspace), automatically run 'Get Latest' before showing the View/Checkout prompt."
+        },
+        "vssBridge.timeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "description": "Maximum time in seconds to wait for each ss.exe operation before aborting it."
+        },
+        "vssBridge.statusBarEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show VSS status of the active file (Checked in / Checked out by ...) in the status bar."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "vssBridge.checkout",
+        "title": "VSS: Check Out",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.checkin",
+        "title": "VSS: Check In",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.undoCheckout",
+        "title": "VSS: Undo Checkout",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.getLatest",
+        "title": "VSS: Get Latest Version",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.history",
+        "title": "VSS: Show History",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.openPrompt",
+        "title": "VSS: View or Check Out...",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.refreshStatus",
+        "title": "VSS: Refresh File Status",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.configure",
+        "title": "VSS: Open Settings",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.testConnection",
+        "title": "VSS: Test Connection & Mapping",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.showLog",
+        "title": "VSS: Show Output Log",
+        "category": "VSS Bridge"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "vssBridge.checkout",
+          "group": "vss@1"
+        },
+        {
+          "command": "vssBridge.checkin",
+          "group": "vss@2"
+        },
+        {
+          "command": "vssBridge.undoCheckout",
+          "group": "vss@3"
+        },
+        {
+          "command": "vssBridge.getLatest",
+          "group": "vss@4"
+        },
+        {
+          "command": "vssBridge.history",
+          "group": "vss@5"
+        },
+        {
+          "command": "vssBridge.openPrompt",
+          "group": "vss@6"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vssBridge.checkout",
+          "group": "vss@1"
+        },
+        {
+          "command": "vssBridge.checkin",
+          "group": "vss@2"
+        },
+        {
+          "command": "vssBridge.undoCheckout",
+          "group": "vss@3"
+        },
+        {
+          "command": "vssBridge.getLatest",
+          "group": "vss@4"
+        },
+        {
+          "command": "vssBridge.history",
+          "group": "vss@5"
+        },
+        {
+          "command": "vssBridge.openPrompt",
+          "group": "vss@6"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/parse.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://example.invalid/vss-bridge"
+  }
+}

@@ -1,0 +1,3 @@
+*.vsix
+test/**
+PUBLISH-GUIDE.md
