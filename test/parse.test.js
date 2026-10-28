@@ -11,6 +11,8 @@ const {
   SsError,
   parseStatusOutput,
   parseHistoryOutput,
+  parseDirListing,
+  lookupListing,
   glDir
 } = require('../lib/ssClient');
 
@@ -143,6 +145,102 @@ test('parseStatusOutput: DOMAIN\\user matches bare username', () => {
 test('parseStatusOutput: case-insensitive username match', () => {
   const r = parseStatusOutput(STATUS_CHECKED_OUT_ME, 'MOIZBOHRA');
   assert.strictEqual(r.byMe, true);
+});
+
+// Real ss.exe pads the user column to 14 but never cuts it: a 14+ char user
+// runs straight into "Exc" (Status) or the date (Dir -E).
+test('parseStatusOutput: 14+ char user glued to "Exc"', () => {
+  const r = parseStatusOutput('errorhandle.php     firstname.lastnamExc  26-10-26  5:44p \r\n\\\\srv\\www\\app\r\n',
+    'Firstname.Lastnam');
+  assert.strictEqual(r.user, 'firstname.lastnam');
+  assert.strictEqual(r.byMe, true);
+});
+
+test('parseStatusOutput: other date formats (month names, yyyy-mm-dd, 24h)', () => {
+  for (const d of ['27-Oct-26  3:50p', '2026-10-27 15:50', '27.10.2026 15.50']) {
+    const r = parseStatusOutput(`login.php           MoizBohra     Exc  ${d}\r\n`, 'moizbohra');
+    assert.strictEqual(r.user, 'MoizBohra', d);
+    assert.strictEqual(r.byMe, true, d);
+  }
+});
+
+test('parseStatusOutput: single-digit day padded with a space', () => {
+  const r = parseStatusOutput('schedule_entry.php  otheruser      7-08-25  4:31p \r\n', 'moizbohra');
+  assert.strictEqual(r.user, 'otheruser');
+});
+
+// `ss Dir -E` (real layout, dummy names): free files in full, checked-out ones
+// cut to 19 chars + user + date, working folder on its own line, 79-char wrap.
+const LONG = '$/MyApp/' + 'x'.repeat(68) + '/abc'; // 80 chars
+const DIR_E = [
+  '$/MyApp/api:',
+  '$orders',
+  'acc_payreq_multi_stage_get_approval.php',
+  'acc_payreq_multi_st otheruser     27-10-26 12:11p ',
+  '\\\\fileserver\\wwwroot\\MyApp\\api',
+  'errorhandle.php     firstname.lastnam26-10-26  5:44p ',
+  '\\\\fileserver\\wwwroot\\MyApp\\api',
+  'login.php           MoizBohra      7-08-25  4:31p ',
+  'C:\\dev\\api',
+  '',
+  LONG.slice(0, 79),
+  LONG.slice(79) + ':',
+  'No items found under',
+  LONG.slice(0, 79),
+  LONG.slice(79),
+  '',
+  '4 item(s)',
+  ''
+].join('\r\n');
+
+test('parseDirListing: projects, free files and checkouts', () => {
+  const tree = parseDirListing(DIR_E, 'moizbohra');
+  assert.deepStrictEqual([...tree.keys()], ['$/myapp/api', LONG.toLowerCase()]);
+  const api = tree.get('$/myapp/api');
+  assert.deepStrictEqual([...api.free], ['acc_payreq_multi_stage_get_approval.php']);
+  assert.deepStrictEqual(api.out.map(o => [o.name, o.user, o.byMe]), [
+    ['acc_payreq_multi_st', 'otheruser', false],
+    ['errorhandle.php', 'firstname.lastnam', false],
+    ['login.php', 'MoizBohra', true]
+  ]);
+  assert.strictEqual(tree.get(LONG.toLowerCase()).out.length, 0);
+});
+
+test('lookupListing: cut name resolves to the checked-out file, not its free sibling', () => {
+  const api = parseDirListing(DIR_E, 'moizbohra').get('$/myapp/api');
+  assert.strictEqual(lookupListing(api, 'acc_payreq_multi_stage_get_approval.php').checkedOut, false);
+  const st = lookupListing(api, 'ACC_PAYREQ_MULTI_STAGE_SET_APPROVAL.php');
+  assert.strictEqual(st.checkedOut, true);
+  assert.strictEqual(st.user, 'otheruser');
+  assert.strictEqual(lookupListing(api, 'login.php').byMe, true);
+  assert.strictEqual(lookupListing(api, 'new_local_file.php').exists, false);
+});
+
+test('SsClient.status: exit 1 = checked out, not-found = exists false', async () => {
+  const c = new SsClient({ username: 'moizbohra' });
+  c.exec = async () => ({ code: 1, timedOut: false, output: STATUS_CHECKED_OUT_ME });
+  assert.strictEqual((await c.status('$/x/login.php')).byMe, true);
+  c.exec = async () => ({ code: 100, timedOut: false, output: STATUS_NOT_FOUND });
+  assert.strictEqual((await c.status('$/x/ghost.php')).exists, false);
+});
+
+test('SsClient.status: a login failure throws instead of reading as "not checked out"', async () => {
+  const c = new SsClient({ username: 'moizbohra' });
+  c.exec = async () => ({ code: 100, timedOut: false, output: 'Invalid password\r\n' });
+  await assert.rejects(c.status('$/x/login.php'), e => e.kind === 'auth');
+});
+
+test('SsClient.run: unknown user (ss.exe hangs on "Password:") fails fast as a login error', async () => {
+  // Fake ss.exe: `node Status ...` runs ./Status from cwd, which prompts and hangs like ss.exe does.
+  const fs = require('fs');
+  const os = require('os');
+  const dir = fs.mkdtempSync(require('path').join(os.tmpdir(), 'vssfake-'));
+  fs.writeFileSync(require('path').join(dir, 'Status'),
+    "process.stdout.write('Username: nosuchuser\\r\\nPassword: '); setInterval(() => {}, 1000);");
+  const c = new SsClient({ ssExePath: process.execPath, username: 'nosuchuser', cwd: dir, timeoutMs: 20000 });
+  const started = Date.now();
+  await assert.rejects(c.run(['Status', '$/x/a.php', '-I-', '-Ynosuchuser,']), e => e.kind === 'auth');
+  assert.ok(Date.now() - started < 10000, 'should not wait for the timeout');
 });
 
 test('SsClient.run: filename containing "password" is not reported as a login failure', async () => {

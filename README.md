@@ -20,6 +20,9 @@ Just like Dreamweaver asks "View or Check Out?" the moment you open a file with 
 | **Show History** | Detail panel for every version - which user, when, with which comment |
 | **Status Bar** | Shows the VSS state of the active file: `Checked in` / `Checked out (you)` / `Checked out by <user>` |
 | **Read-only View** | "View Only" keeps the Windows read-only attribute on the file, so it cannot be saved by accident |
+| **Explorer badges** | Files checked out in VSS get a ✓ in the Explorer: **green** = checked out by you (parent folders turn green too), **red** = checked out by someone else (hover to see who) |
+| **Multiple files at once** | Select several files or a folder in the Explorer -> Check Out / Check In / Undo Checkout / Get Latest. One comment for the whole check-in |
+| **Check In My Checkouts** | One list of every file you have checked out - untick what you want to keep and check in the rest |
 
 ## Requirements
 
@@ -35,7 +38,7 @@ The extension calls VSS's official command line tool `ss.exe`, so it works with 
 ### Method 1 - Command line (easiest)
 
 ```cmd
-code --install-extension VSS-Bridge-0.1.7.vsix
+code --install-extension vss-bridge-0.2.0.vsix
 ```
 
 ### Method 2 - VS Code UI
@@ -43,7 +46,7 @@ code --install-extension VSS-Bridge-0.1.7.vsix
 1. Open VS Code
 2. Click the **Extensions** icon on the left (or press `Ctrl+Shift+X`)
 3. In the Extensions panel, open the top-right `...` menu -> **Install from VSIX...**
-4. Select the `VSS-Bridge-0.1.7.vsix` file
+4. Select the `vss-bridge-0.2.0.vsix` file
 5. Reload VS Code
 
 ## Settings (Essential Configuration)
@@ -86,6 +89,8 @@ After installing, configure the settings once. Open `File > Preferences > Settin
 | `vssBridge.autoGetWhenMissing` | `true` | If the local file is missing, run Get Latest first |
 | `vssBridge.timeoutSeconds` | `60` | Timeout for every ss.exe operation |
 | `vssBridge.statusBarEnabled` | `true` | Status bar indicator |
+| `vssBridge.explorerDecorations` | `true` | ✓ badges on checked-out files in the Explorer |
+| `vssBridge.explorerRefreshMinutes` | `5` | How often visible folders are re-read to pick up other people's checkouts (`0` = only after your own actions and **VSS: Refresh Status**) |
 
 ### Understanding vssProject mapping (important - fixes "is not an existing filename")
 
@@ -191,6 +196,24 @@ If the file is NOT checked out and you have **no local edits** (read-only pristi
 
 - **Right-click -> VSS: Undo Checkout** - local changes are discarded and the latest VSS copy is restored (it asks for confirmation first)
 
+### Working with several files
+
+- **Ctrl/Shift-click several files** in the Explorer (or right-click a **folder**) -> **VSS: Check Out / Check In / Undo Checkout / Get Latest**. A folder includes every file under it.
+- Only files where the action makes sense are touched; the rest are counted as "skipped". For example, Check In and Undo Checkout only take files checked out by you, and Check Out leaves out files you already have.
+- Check In asks for **one comment** for all files. If some files are editable locally, Check Out / Get Latest ask before overwriting them (**Overwrite** or **Skip Editable Files**).
+- A progress notification shows `3/12 file.php` and can be cancelled. At the end you get a summary (`10 checked in, 2 failed`) with a button to the Output log.
+- **VSS: Check In My Checkouts...** (Command Palette, status bar menu or Explorer right-click) lists every workspace file you have checked out, all ticked. Untick the ones to keep and press Enter.
+
+### Explorer badges
+
+| Badge | Meaning |
+|---|---|
+| green ✓ (folder name green too) | Checked out by you |
+| red ✓ | Checked out by someone else - hover to see who |
+| no badge | Checked in, or not in VSS |
+
+Only the folders you have open in the Explorer are read from VSS (one quick `ss Dir` per folder). The badges refresh after your own VSS actions, every `vssBridge.explorerRefreshMinutes`, and when you run **VSS: Refresh Status**.
+
 ### 4. Viewing history
 
 - **Right-click -> VSS: Show History** - a side panel shows all versions: version number, user, date/time, action and comment
@@ -214,11 +237,12 @@ Click the status bar -> the quick menu with all VSS actions opens.
 |---|---|
 | `VSS: Check Out` | Check out (on a file or Explorer selection) |
 | `VSS: Check In` | Check in with a comment |
+| `VSS: Check In My Checkouts...` | Pick from every file you have checked out and check them in together |
 | `VSS: Undo Checkout` | Discard changes and release the lock |
 | `VSS: Get Latest Version` | Pull the latest copy from VSS |
 | `VSS: Show History` | Open the history panel |
 | `VSS: View or Check Out...` | Show the open prompt again |
-| `VSS: Refresh File Status` | Refresh the status bar |
+| `VSS: Refresh Status` | Re-read the status bar and Explorer badges from VSS |
 | `VSS: Test Connection & Mapping` | Step-by-step diagnosis: ss.exe, srcsafe.ini, login, file mapping |
 | `VSS: Show Output Log` | Full log of ss.exe commands (debugging) |
 | `VSS: Open Settings` | Open the extension settings |
@@ -228,6 +252,8 @@ Click the status bar -> the quick menu with all VSS actions opens.
 | Problem | Solution |
 |---|---|
 | `is not an existing filename or project` | **The mapping is wrong.** The local file path and the VSS project path do not match. Check `vssBridge.vssProject` and use `vssBridge.mappings` if needed (full example above in this README). You can also run **Test Connection & Mapping** directly from the error dialog buttons |
+| Check In says "checked out by someone else" although it is yours | Fixed in **0.2.0**: VSS user names of 14+ characters (e.g. `firstname.lastname`) were read wrongly. Also check that `vssBridge.username` is your VSS user name (the one shown in VSS Explorer), not your Windows login |
+| Every VSS command takes a minute and then says "ss.exe did not respond" | Before 0.2.0 this meant `vssBridge.username` is not a VSS user: ss.exe waited for a password. 0.2.0 shows "VSS did not accept the login" at once - fix the username/password |
 | Check In fails | (1) The file is not checked out? Since 0.1.6 the extension detects whether you have local edits and offers a smart flow that preserves them. (2) Checked out by someone else? The error names the user - ask them to check it in first. (3) Left the comment empty? That was fixed in v0.1.1 - please update. (4) For the exact error, open `VSS: Show Output Log` |
 | "Check Out and Edit" destroyed my local edits | Fixed in **0.1.6** - the Check In command on a not-checked-out file now branches: writable file (you have edits) -> smart flow with a backup/restore step that preserves your work; read-only file -> safe plain Check Out. The 0.1.5 button ran `ss Checkout` directly which overwrote the local copy |
 | `ss.exe was not found` | Check `vssBridge.ssExePath`. Look in the VSS install folder - right-click the "Microsoft Visual SourceSafe" shortcut in the Start menu -> Open file location. `ss.exe` is in the same folder |

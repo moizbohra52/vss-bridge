@@ -2,6 +2,22 @@
 
 All notable changes to the VSS Bridge extension are documented here.
 
+## [0.2.0] - 2026-10-28
+
+### Fixed
+- **Check In says "checked out by someone else" for users with long VSS names.** `ss Status` pads the user column to 14 characters but never cuts it, so a 14+ character name runs straight into the type column: `errorhandle.php     firstname.lastnamExc  26-10-26  5:44p`. The parser read the user as `firstname.lastnamExc`, so your own checkout was not recognised as yours. Verified against all 1,891 checkout lines of a real 23,000-item VSS tree.
+- **Every VSS command hangs for 60 s, then says "ss.exe did not respond... check your network".** This happens when `vssBridge.username` is not a VSS user: ss.exe ignores `-I-`, asks `Password:` on the console and waits forever. The prompt is now detected, ss.exe is stopped at once, and you get a clear "VSS did not accept the login" error.
+- **Login or network errors read as "not checked out".** `ss Status` errors were treated as "file is free", so Check In said "there is nothing to check in". They are now reported as errors.
+- **Dates in other regional formats** (`27-Oct-26`, `2026-10-27`, `27.10.2026`, 24-hour times) are now recognised, so checkouts are still detected on PCs with different date settings.
+- **Check Out on an editable file could silently destroy local edits** (`ss Checkout -I-Y` replaces writable files). It now asks first.
+- **Right-click a folder > VSS: Check Out / Check In...** ran ss.exe on the folder with the wrong local folder. It now works on the files inside the folder.
+
+### Added
+- **Explorer badges**: files checked out in VSS show a ✓. Green means you have them, and their parent folders turn green too. Red means someone else has them; hover to see who. Only the folders you have open are read (one quick `ss Dir -E` each, about 0.3 s), and they refresh every `vssBridge.explorerRefreshMinutes` (default 5), after your own VSS actions, and on **VSS: Refresh Status**.
+- **Multiple files at once**: select several files or a folder in the Explorer, then use Check Out / Check In / Undo Checkout / Get Latest. Check In asks for one comment for all of them. Files that do not apply are skipped (for example, Check In skips files that are not checked out by you). Progress is shown and can be cancelled, and a summary lists failures with a link to the log.
+- **VSS: Check In My Checkouts...** lists every workspace file you have checked out (all ticked), and checks in the ones you keep ticked.
+- Settings `vssBridge.explorerDecorations` and `vssBridge.explorerRefreshMinutes`.
+
 ## [0.1.8] - 2026-10-27
 
 ### Fixed

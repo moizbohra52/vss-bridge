@@ -1,8 +1,8 @@
 {
   "name": "vss-bridge",
   "displayName": "VSS Bridge (Visual SourceSafe)",
-  "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands. Developed by Moiz Bohra.",
-  "version": "0.1.9",
+  "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands, multi-file check in/out, and Explorer badges for checked-out files. Developed by Moiz Bohra.",
+  "version": "0.2.0",
   "publisher": "MoizBohra",
   "author": {
     "name": "Moiz Bohra"
@@ -129,6 +129,17 @@
           "type": "boolean",
           "default": true,
           "description": "Show VSS status of the active file (Checked in / Checked out by ...) in the status bar."
+        },
+        "vssBridge.explorerDecorations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a ✓ badge in the Explorer on files checked out in VSS (green = by you, red = by someone else; hover for the name). Reads one VSS folder at a time, only for folders you have open."
+        },
+        "vssBridge.explorerRefreshMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "How often the Explorer badges of visible folders are re-read from VSS, to pick up other people's checkouts. 0 = only after your own VSS actions and \"VSS: Refresh Status\"."
         }
       }
     },
@@ -141,6 +152,11 @@
       {
         "command": "vssBridge.checkin",
         "title": "VSS: Check In",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.checkinMine",
+        "title": "VSS: Check In My Checkouts...",
         "category": "VSS Bridge"
       },
       {
@@ -165,7 +181,7 @@
       },
       {
         "command": "vssBridge.refreshStatus",
-        "title": "VSS: Refresh File Status",
+        "title": "VSS: Refresh Status",
         "category": "VSS Bridge"
       },
       {
@@ -195,6 +211,10 @@
           "group": "vss@2"
         },
         {
+          "command": "vssBridge.checkinMine",
+          "group": "vss@2"
+        },
+        {
           "command": "vssBridge.undoCheckout",
           "group": "vss@3"
         },
@@ -204,11 +224,13 @@
         },
         {
           "command": "vssBridge.history",
-          "group": "vss@5"
+          "group": "vss@5",
+          "when": "!explorerResourceIsFolder"
         },
         {
           "command": "vssBridge.openPrompt",
-          "group": "vss@6"
+          "group": "vss@6",
+          "when": "!explorerResourceIsFolder"
         }
       ],
       "editor/context": [
@@ -237,7 +259,27 @@
           "group": "vss@6"
         }
       ]
-    }
+    },
+    "colors": [
+      {
+        "id": "vssBridge.checkedOutByMe",
+        "description": "Explorer color of files you have checked out in VSS.",
+        "defaults": {
+          "dark": "gitDecoration.addedResourceForeground",
+          "light": "gitDecoration.addedResourceForeground",
+          "highContrast": "gitDecoration.addedResourceForeground"
+        }
+      },
+      {
+        "id": "vssBridge.checkedOutByOther",
+        "description": "Explorer color of files someone else has checked out in VSS.",
+        "defaults": {
+          "dark": "gitDecoration.deletedResourceForeground",
+          "light": "gitDecoration.deletedResourceForeground",
+          "highContrast": "gitDecoration.deletedResourceForeground"
+        }
+      }
+    ]
   },
   "scripts": {
     "test": "node test/parse.test.js"

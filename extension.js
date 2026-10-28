@@ -18,7 +18,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const PKG = require('./package.json');
-const { SsClient, SsError, glDir } = require('./lib/ssClient');
+const { SsClient, SsError, glDir, lookupListing } = require('./lib/ssClient');
 const { HistoryPanel } = require('./lib/historyPanel');
 const { mapToVssPath: computeVssPath, normalizeVssProject } = require('./lib/vssPaths');
 
@@ -53,6 +53,8 @@ function readConfig() {
     autoGetWhenMissing: cfg.get('autoGetWhenMissing', true),
     timeoutSeconds: cfg.get('timeoutSeconds', 60),
     statusBarEnabled: cfg.get('statusBarEnabled', true),
+    explorerDecorations: cfg.get('explorerDecorations', true),
+    explorerRefreshMinutes: cfg.get('explorerRefreshMinutes', 5),
     workspaceFolder: folder
   };
 }
@@ -84,6 +86,8 @@ function rebuildClient() {
     logger: (line) => log(line)
   });
   statusCache.clear();
+  folderStatus.clear();
+  badgesChanged.fire(undefined);
   return cfg;
 }
 
@@ -133,15 +137,100 @@ function setReadOnly(fsPath, readOnly) {
 //  Serialized ss.exe access (avoid concurrent VSS operations)           //
 // --------------------------------------------------------------------- //
 
-let opQueue = Promise.resolve();
+function serialQueue() {
+  let tail = Promise.resolve();
+  return (job) => {
+    const run = tail.then(job, job);
+    tail = run.catch(() => { /* keep queue alive */ });
+    return run;
+  };
+}
 // NOTE: never call the do* commands (doCheckout / doCheckin / doGetLatest ...)
 // from INSIDE an enqueued job - they enqueue again, so the inner job would
 // wait for the outer one to finish while the outer one waits for the inner:
 // a deadlock that silently stops every later VSS operation until reload.
-function enqueue(job) {
-  const run = opQueue.then(job, job);
-  opQueue = run.catch(() => { /* keep queue alive */ });
-  return run;
+const enqueue = serialQueue();
+// Read-only `ss Dir` for Explorer badges: own lane so badges never delay a check-in.
+const enqueueListing = serialQueue();
+
+// --------------------------------------------------------------------- //
+//  Explorer badges: one quick `ss Dir -E` per folder you look at        //
+//  (a recursive scan of a big project takes a minute, one folder ~0.3s) //
+// --------------------------------------------------------------------- //
+
+const folderStatus = new Map();                    // lower-case VSS folder -> { when, listing, loading, stale }
+const badgesChanged = new vscode.EventEmitter();
+let badgeTimer = null;
+
+/** VSS path of a local file, split into its project folder and file name. */
+function vssLocation(uri) {
+  const vssPath = mapToVssPath(uri);
+  if (!vssPath) { return null; }
+  const i = vssPath.lastIndexOf('/');
+  return { vssPath, folder: i <= 1 ? '$/' : vssPath.slice(0, i), name: vssPath.slice(i + 1) };
+}
+
+/** (Re)read one VSS folder in the background; resolves when the listing is in. */
+function loadFolderStatus(folder) {
+  const key = folder.toLowerCase();
+  const entry = folderStatus.get(key) || { when: 0, listing: null };
+  folderStatus.set(key, entry);
+  entry.stale = false;
+  const job = enqueueListing(async () => {
+    try {
+      entry.listing = await client.dirListing(folder);
+    } catch (err) {
+      if (err instanceof SsError && err.kind === 'notfound') { entry.listing = { free: new Set(), out: [] }; }
+      else { log(`Explorer status of ${folder} failed: ${err && err.message ? err.message : err}`); }
+    }
+    entry.when = Date.now();
+    if (entry.loading === job) { entry.loading = null; }
+    badgesChanged.fire(undefined);
+  });
+  entry.loading = job;
+  return job;
+}
+
+/** Last known VSS state of a file from its folder listing, or null if not loaded. */
+function cachedStatus(loc) {
+  const e = folderStatus.get(loc.folder.toLowerCase());
+  return e && e.listing ? lookupListing(e.listing, loc.name) : null;
+}
+
+/** Re-read the folder of a file after one of our own VSS actions changed it. */
+function refreshBadges(uri) {
+  const loc = vssLocation(uri);
+  if (loc && folderStatus.has(loc.folder.toLowerCase())) { loadFolderStatus(loc.folder); }
+}
+
+const badgeProvider = {
+  onDidChangeFileDecorations: badgesChanged.event,
+  provideFileDecoration(uri) {
+    if (uri.scheme !== 'file' || !client.configured) { return undefined; }
+    const cfg = readConfig();
+    if (!cfg.explorerDecorations) { return undefined; }
+    const loc = vssLocation(uri);
+    if (!loc) { return undefined; }
+    const e = folderStatus.get(loc.folder.toLowerCase());
+    const maxAge = cfg.explorerRefreshMinutes * 60000;
+    if (!e || (!e.loading && (e.stale || (maxAge > 0 && Date.now() - e.when > maxAge)))) {
+      loadFolderStatus(loc.folder);
+    }
+    const st = cachedStatus(loc);
+    if (!st || !st.checkedOut) { return undefined; }
+    const deco = new vscode.FileDecoration('✓',
+      st.byMe ? 'VSS: checked out by you' : `VSS: checked out by ${st.user}`,
+      new vscode.ThemeColor(st.byMe ? 'vssBridge.checkedOutByMe' : 'vssBridge.checkedOutByOther'));
+    deco.propagate = st.byMe; // tint parent folders only for your own checkouts
+    return deco;
+  }
+};
+
+/** Periodic refresh: VS Code re-asks the visible files, stale folders reload. */
+function restartBadgeTimer() {
+  clearInterval(badgeTimer);
+  const minutes = readConfig().explorerRefreshMinutes;
+  badgeTimer = minutes > 0 ? setInterval(() => badgesChanged.fire(undefined), minutes * 60000) : null;
 }
 
 // --------------------------------------------------------------------- //
@@ -318,11 +407,22 @@ function resolveTargetUri(arg) {
   return null;
 }
 
-async function doCheckout(uri, { silent = false } = {}) {
+async function doCheckout(uri, { silent = false, overwriteOk = false } = {}) {
   if (!uri) { uri = resolveTargetUri(); }
   if (!uri) { return; }
   const vssPath = mapToVssPath(uri);
   if (!vssPath) { vscode.window.showErrorMessage('VSS Bridge: this file is outside the mapped workspace folder.'); return; }
+
+  // ss Checkout -I-Y replaces a writable local copy, which would silently destroy local edits.
+  if (!overwriteOk && fs.existsSync(uri.fsPath) && isWritable(uri.fsPath)) {
+    const choice = await vscode.window.showWarningMessage(
+      `"${path.basename(uri.fsPath)}" is editable locally (already checked out, or it has local changes). ` +
+      'Check Out replaces it with the VSS version. Continue?',
+      { modal: true },
+      'Overwrite and Check Out'
+    );
+    if (choice !== 'Overwrite and Check Out') { return; }
+  }
 
   const key = uri.toString();
   await enqueue(async () => {
@@ -333,6 +433,7 @@ async function doCheckout(uri, { silent = false } = {}) {
       );
       setReadOnly(uri.fsPath, false);
       statusCache.delete(key);
+      refreshBadges(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       if (!silent) {
@@ -437,7 +538,7 @@ async function doCheckin(uri) {
       );
       if (!choice || choice === 'Cancel') { return; }
       if (choice === 'Just Check Out (Discard My Changes)') {
-        await doCheckout(uri, { silent: false }); // safe: pre-flight job already finished
+        await doCheckout(uri, { silent: false, overwriteOk: true }); // safe: pre-flight job already finished
         return;
       }
       await smartCheckoutAndCheckin(uri, vssPath); // smart flow (atomic, deadlock-safe)
@@ -473,6 +574,7 @@ async function doCheckin(uri) {
       setReadOnly(uri.fsPath, true);
       statusCache.delete(key);
       handledDocs.delete(key); // next open should ask again
+      refreshBadges(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       vscode.window.showInformationMessage(`VSS Bridge: "${path.basename(uri.fsPath)}" checked in successfully.`);
@@ -570,6 +672,7 @@ async function smartCheckoutAndCheckin(uri, vssPath) {
       setReadOnly(fsPath, true);
       statusCache.delete(key);
       handledDocs.delete(key);
+      refreshBadges(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       log(`SMART-CHECKIN SUCCESS: ${basename}`);
@@ -586,6 +689,7 @@ async function smartCheckoutAndCheckin(uri, vssPath) {
         setReadOnly(fsPath, false);
         statusCache.delete(key);
         handledDocs.delete(key);
+        refreshBadges(uri);
         updateStatusBarFor(uri);
         const detail = (err && err.message) ? err.message : String(err);
         vscode.window.showErrorMessage(
@@ -625,6 +729,7 @@ async function doUndoCheckout(uri) {
       setReadOnly(uri.fsPath, true);
       statusCache.delete(key);
       handledDocs.delete(key);
+      refreshBadges(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       vscode.window.showInformationMessage(`VSS Bridge: checkout of "${path.basename(uri.fsPath)}" was undone.`);
@@ -696,6 +801,182 @@ async function doOpenPrompt(uri) {
   handledDocs.delete(key);
   statusCache.delete(key);
   await handleOpenDocument(uri, 'manual');
+}
+
+// --------------------------------------------------------------------- //
+//  Several files at once (Explorer multi-select, folders, my checkouts) //
+// --------------------------------------------------------------------- //
+
+const BATCH_OPS = {
+  checkout: { title: 'Check Out', done: 'checked out', run: (v, d) => client.checkout(v, d), readOnly: false },
+  checkin: { title: 'Check In', done: 'checked in', run: (v, d, c) => client.checkin(v, d, c), readOnly: true },
+  undo: { title: 'Undo Checkout', done: 'undone', run: (v, d) => client.undoCheckout(v, d), readOnly: true },
+  get: { title: 'Get Latest', done: 'retrieved', run: (v, d) => client.get(v, d), readOnly: null }
+};
+
+/**
+ * Explorer commands get (clicked, allSelected). One file keeps the detailed
+ * single-file flow; several files or a folder (recursive) go to runBatch.
+ */
+async function runOn(op, single, arg, selected) {
+  const picked = Array.isArray(selected) && selected.length ? selected : [resolveTargetUri(arg)];
+  const files = [];
+  let hadFolder = false;
+  for (const u of picked) {
+    if (!u || u.scheme !== 'file') { continue; }
+    let isDir = false;
+    try { isDir = fs.statSync(u.fsPath).isDirectory(); } catch (e) { /* not on disk yet - still a VSS file */ }
+    if (!isDir) { files.push(u); continue; }
+    hadFolder = true;
+    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(u, '**/*'));
+    files.push(...found.filter(f => !/\.scc$/i.test(f.fsPath))); // vssver2.scc = VSS bookkeeping
+  }
+  const unique = [...new Map(files.map(u => [u.toString(), u])).values()];
+  if (unique.length === 1 && !hadFolder) { return single(unique[0]); }
+  if (unique.length) { return runBatch(op, unique); }
+  if (hadFolder) { vscode.window.showInformationMessage('VSS Bridge: no files found in the selected folder.'); }
+}
+
+async function runBatch(op, uris) {
+  const spec = BATCH_OPS[op];
+  if (!client.configured) { await vscode.commands.executeCommand('vssBridge.configure'); return; }
+  const items = uris.map(uri => ({ uri, loc: vssLocation(uri) })).filter(x => x.loc);
+  let skipped = uris.length - items.length; // outside the mapped folders
+
+  // Fresh state of every involved folder, so only files that make sense are touched.
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'VSS: reading file status...' },
+    () => Promise.all([...new Set(items.map(x => x.loc.folder))].map(loadFolderStatus)));
+  // Unknown state (listing failed) falls back to the writable-file heuristic.
+  const mine = x => { const st = cachedStatus(x.loc); return st ? st.byMe : isWritable(x.uri.fsPath); };
+  const inVss = x => { const st = cachedStatus(x.loc); return !st || st.exists; };
+  const wanted = op === 'checkin' || op === 'undo' ? mine
+    : op === 'checkout' ? (x => inVss(x) && !mine(x))
+    : inVss;
+  let targets = items.filter(wanted);
+  skipped += items.length - targets.length;
+
+  let comment = '';
+  if (targets.length && op === 'checkin') {
+    for (const x of targets) {
+      const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === x.uri.toString());
+      if (doc && doc.isDirty) { await doc.save(); } // VSS checks in what is on disk
+    }
+    comment = await vscode.window.showInputBox({
+      prompt: `Check-in comment for ${targets.length} file(s) (optional - press Enter to skip)`,
+      placeHolder: 'e.g. Fixed null reference in payment module'
+    });
+    if (comment === undefined) { return; }
+  } else if (targets.length && op === 'undo') {
+    const choice = await vscode.window.showWarningMessage(
+      `Undo checkout of ${targets.length} file(s)? Their local changes will be REPLACED with the latest VSS version.`,
+      { modal: true }, 'Undo Checkout');
+    if (choice !== 'Undo Checkout') { return; }
+  } else if (targets.length) {
+    // checkout / get: ss -I-Y overwrites writable local copies, which may hold edits.
+    const editable = targets.filter(x => isWritable(x.uri.fsPath));
+    if (editable.length) {
+      const choice = await vscode.window.showWarningMessage(
+        `${editable.length} of ${targets.length} file(s) are editable locally and may contain changes. ` +
+        `${spec.title} replaces them with the VSS version.`,
+        { modal: true }, 'Overwrite', 'Skip Editable Files');
+      if (!choice) { return; }
+      if (choice === 'Skip Editable Files') {
+        targets = targets.filter(x => !editable.includes(x));
+        skipped += editable.length;
+      }
+    }
+  }
+  if (!targets.length) {
+    vscode.window.showInformationMessage(
+      `VSS Bridge: nothing to ${spec.title.toLowerCase()} - ${skipped} file(s) skipped ` +
+      (op === 'checkin' || op === 'undo' ? '(not checked out by you).' : '(not in VSS, or already checked out by you).'));
+    return;
+  }
+
+  let done = 0;
+  const failed = [];
+  await enqueue(() => vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `VSS: ${spec.title} (${targets.length} files)`, cancellable: true },
+    async (progress, token) => {
+      for (const [i, x] of targets.entries()) {
+        if (token.isCancellationRequested) { break; }
+        progress.report({ message: `${i + 1}/${targets.length} ${path.basename(x.uri.fsPath)}`, increment: 100 / targets.length });
+        try {
+          await spec.run(x.loc.vssPath, glDir(path.dirname(x.uri.fsPath)), comment.trim());
+          if (spec.readOnly !== null) { setReadOnly(x.uri.fsPath, spec.readOnly); }
+          statusCache.delete(x.uri.toString());
+          if (spec.readOnly) { handledDocs.delete(x.uri.toString()); } // next open should ask again
+          await revertDocument(x.uri);
+          done++;
+        } catch (err) {
+          failed.push(x);
+          log(`!! ${op} failed for ${x.loc.vssPath}: ${err && err.message ? err.message : err}`);
+        }
+      }
+    }));
+
+  for (const f of new Set(targets.map(x => x.loc.folder))) { loadFolderStatus(f); }
+  if (vscode.window.activeTextEditor) { updateStatusBarFor(vscode.window.activeTextEditor.document.uri); }
+  const summary = `VSS Bridge: ${done} file(s) ${spec.done}` +
+    (failed.length ? `, ${failed.length} failed` : '') + (skipped ? `, ${skipped} skipped` : '') + '.';
+  if (failed.length) {
+    vscode.window.showWarningMessage(summary + ' The output log has the ss.exe errors.', 'Show Output Log')
+      .then(c => { if (c === 'Show Output Log') { doShowLog(); } });
+  } else {
+    vscode.window.showInformationMessage(summary);
+  }
+}
+
+/** VSS projects the workspace maps to, minus ones nested inside another. */
+function vssRoots(cfg) {
+  const all = [cfg.vssProject, ...cfg.mappings.filter(m => m && m.vss).map(m => normalizeVssProject(m.vss))]
+    .sort((a, b) => a.length - b.length);
+  const inside = (r, p) => {
+    r = r.toLowerCase(); p = p.toLowerCase();
+    return r === p || r.startsWith(p === '$/' ? p : p + '/');
+  };
+  return all.filter((r, i) => !all.slice(0, i).some(p => inside(r, p)));
+}
+
+/** List every workspace file you have checked out and check in the ones you pick. */
+async function doCheckinMine() {
+  const cfg = readConfig();
+  if (!client.configured) { await vscode.commands.executeCommand('vssBridge.configure'); return; }
+  let uris;
+  try {
+    uris = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'VSS: finding files checked out by you...' },
+      async () => {
+        // 1. Folders holding my checkouts (ss.exe filters by user; names are cut to 19 chars).
+        const mine = new Map();
+        for (const root of vssRoots(cfg)) {
+          const tree = await enqueue(() => client.checkedOutBy(root, cfg.username));
+          for (const [folder, listing] of tree) { if (listing.out.length) { mine.set(folder, listing); } }
+        }
+        if (!mine.size) { return []; }
+        // 2. Local files in those folders whose name matches.
+        const found = (await vscode.workspace.findFiles('**/*')).filter(u => {
+          const loc = vssLocation(u);
+          const listing = loc && mine.get(loc.folder.toLowerCase());
+          return listing && lookupListing(listing, loc.name).checkedOut;
+        });
+        // 3. Exact state from the full folder listings (tells apart names that share 19 chars).
+        await Promise.all([...new Set(found.map(u => vssLocation(u).folder))].map(loadFolderStatus));
+        return found.filter(u => { const st = cachedStatus(vssLocation(u)); return !st || st.byMe; });
+      });
+  } catch (err) {
+    showVssError(err);
+    return;
+  }
+  if (!uris.length) {
+    vscode.window.showInformationMessage('VSS Bridge: you have no files checked out in the mapped VSS project(s).');
+    return;
+  }
+  const picks = await vscode.window.showQuickPick(
+    uris.map(uri => ({ label: path.basename(uri.fsPath), description: vscode.workspace.asRelativePath(uri), picked: true, uri })),
+    { canPickMany: true, placeHolder: `${uris.length} file(s) checked out by you - untick any you do not want to check in` });
+  if (picks && picks.length) { await runBatch('checkin', picks.map(p => p.uri)); }
 }
 
 /**
@@ -842,6 +1123,7 @@ async function showQuickMenu() {
   const items = [
     { label: '$(pencil)  Check Out', description: 'Lock for editing and get the latest version', cmd: 'vssBridge.checkout' },
     { label: '$(cloud-upload)  Check In', description: 'Submit your changes with a comment', cmd: 'vssBridge.checkin' },
+    { label: '$(checklist)  Check In My Checkouts...', description: 'Pick from every file you have checked out', cmd: 'vssBridge.checkinMine' },
     { label: '$(discard)  Undo Checkout', description: 'Discard local changes and release the lock', cmd: 'vssBridge.undoCheckout' },
     { label: '$(cloud-download)  Get Latest Version', description: 'Refresh local copy from VSS', cmd: 'vssBridge.getLatest' },
     { label: '$(history)  Show History', description: 'All versions with users and comments', cmd: 'vssBridge.history' },
@@ -917,15 +1199,18 @@ async function activate(ctx) {
 
   // --- commands -------------------------------------------------------
   const reg = (id, fn) => ctx.subscriptions.push(vscode.commands.registerCommand(id, fn));
-  reg('vssBridge.checkout', (arg) => doCheckout(resolveTargetUri(arg)));
-  reg('vssBridge.checkin', (arg) => doCheckin(resolveTargetUri(arg)));
-  reg('vssBridge.undoCheckout', (arg) => doUndoCheckout(resolveTargetUri(arg)));
-  reg('vssBridge.getLatest', (arg) => doGetLatest(resolveTargetUri(arg)));
+  reg('vssBridge.checkout', (arg, all) => runOn('checkout', doCheckout, arg, all));
+  reg('vssBridge.checkin', (arg, all) => runOn('checkin', doCheckin, arg, all));
+  reg('vssBridge.undoCheckout', (arg, all) => runOn('undo', doUndoCheckout, arg, all));
+  reg('vssBridge.getLatest', (arg, all) => runOn('get', doGetLatest, arg, all));
+  reg('vssBridge.checkinMine', () => doCheckinMine());
   reg('vssBridge.history', (arg) => doShowHistory(resolveTargetUri(arg)));
   reg('vssBridge.openPrompt', (arg) => doOpenPrompt(resolveTargetUri(arg)));
   reg('vssBridge.refreshStatus', (arg) => {
     const uri = resolveTargetUri(arg);
     if (uri) { statusCache.delete(uri.toString()); updateStatusBarFor(uri); }
+    for (const e of folderStatus.values()) { e.stale = true; }
+    badgesChanged.fire(undefined);
   });
   reg('vssBridge.configure', async () => {
     const cfgNow = readConfig();
@@ -939,6 +1224,13 @@ async function activate(ctx) {
   reg('vssBridge.quickMenu', () => showQuickMenu());
   reg('vssBridge.testConnection', (arg) => doTestConnection(resolveTargetUri(arg)));
   reg('vssBridge.showLog', () => doShowLog());
+
+  // --- explorer badges ------------------------------------------------
+  ctx.subscriptions.push(
+    vscode.window.registerFileDecorationProvider(badgeProvider),
+    badgesChanged,
+    { dispose: () => clearInterval(badgeTimer) });
+  restartBadgeTimer();
 
   // --- events ---------------------------------------------------------
   ctx.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => {
@@ -957,6 +1249,7 @@ async function activate(ctx) {
   ctx.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration('vssBridge') || e.affectsConfiguration('workbench')) {
       rebuildClient();
+      restartBadgeTimer();
       if (vscode.window.activeTextEditor) { updateStatusBarFor(vscode.window.activeTextEditor.document.uri); }
     }
   }));
