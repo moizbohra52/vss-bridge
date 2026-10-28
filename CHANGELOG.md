@@ -2,6 +2,23 @@
 
 All notable changes to the VSS Bridge extension are documented here.
 
+## [0.2.1] - 2026-10-28
+
+### Added
+- **"Do you want to keep their changes?"** If someone else checked in a newer version after you opened the file, and you have changes too (unsaved text, or edits saved without checking out), Check Out and Check In stop and ask, naming who changed it, the version, the date and the comment:
+  - **Merge (Compare Both)**: checks the file out *with your changes* and opens their version (left, read-only) next to yours (right). Take their lines with the arrow next to each change, save, then Check In.
+  - **Keep Their Changes**: your copy is replaced with their version.
+  - **Keep Only Mine**: your changes win, and theirs are overwritten when you check in.
+
+  The extension notes the content of the read-only file you opened, so you are only asked when they really changed something.
+- When your copy was simply older, Check Out tells you whose changes just arrived ("newer changes by X, version 6, ...").
+- **Heads-up for files you have open**: "X just checked out a.php" and "X released a.php", with **Compare With Their Version** / **Get Their Version** buttons. These arrive with the Explorer badge refresh (`vssBridge.explorerRefreshMinutes`).
+- **Shared working folders**: opening a writable file that someone else has checked out now warns you that your saves go into their checkout. Before, "writable" was always taken to mean "yours".
+
+### Fixed
+- **Check Out wiped unsaved typing**: after the checkout the editor was reloaded from disk. Your text is now kept, or merged as described above.
+- **Check Out, Get Latest and the smart Check In failed on edited (writable) files** with `A writable copy of ... already exists`. ss.exe refuses to replace a writable file even with `-I-Y`. It now gets `-GWR`, and the extension backs up your changes first and puts them back, or asks before overwriting.
+
 ## [0.2.0] - 2026-10-28
 
 ### Fixed
@@ -9,7 +26,6 @@ All notable changes to the VSS Bridge extension are documented here.
 - **Every VSS command hangs for 60 s, then says "ss.exe did not respond... check your network".** This happens when `vssBridge.username` is not a VSS user: ss.exe ignores `-I-`, asks `Password:` on the console and waits forever. The prompt is now detected, ss.exe is stopped at once, and you get a clear "VSS did not accept the login" error.
 - **Login or network errors read as "not checked out".** `ss Status` errors were treated as "file is free", so Check In said "there is nothing to check in". They are now reported as errors.
 - **Dates in other regional formats** (`27-Oct-26`, `2026-10-27`, `27.10.2026`, 24-hour times) are now recognised, so checkouts are still detected on PCs with different date settings.
-- **Check Out on an editable file could silently destroy local edits** (`ss Checkout -I-Y` replaces writable files). It now asks first.
 - **Right-click a folder > VSS: Check Out / Check In...** ran ss.exe on the folder with the wrong local folder. It now works on the files inside the folder.
 
 ### Added

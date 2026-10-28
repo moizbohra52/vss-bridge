@@ -38,7 +38,7 @@ The extension calls VSS's official command line tool `ss.exe`, so it works with 
 ### Method 1 - Command line (easiest)
 
 ```cmd
-code --install-extension vss-bridge-0.2.0.vsix
+code --install-extension vss-bridge-0.2.1.vsix
 ```
 
 ### Method 2 - VS Code UI
@@ -46,7 +46,7 @@ code --install-extension vss-bridge-0.2.0.vsix
 1. Open VS Code
 2. Click the **Extensions** icon on the left (or press `Ctrl+Shift+X`)
 3. In the Extensions panel, open the top-right `...` menu -> **Install from VSIX...**
-4. Select the `vss-bridge-0.2.0.vsix` file
+4. Select the `vss-bridge-0.2.1.vsix` file
 5. Reload VS Code
 
 ## Settings (Essential Configuration)
@@ -204,6 +204,27 @@ If the file is NOT checked out and you have **no local edits** (read-only pristi
 - A progress notification shows `3/12 file.php` and can be cancelled. At the end you get a summary (`10 checked in, 2 failed`) with a button to the Output log.
 - **VSS: Check In My Checkouts...** (Command Palette, status bar menu or Explorer right-click) lists every workspace file you have checked out, all ticked. Untick the ones to keep and press Enter.
 
+### When someone else changed the same file
+
+Suppose you opened `tax.php`, a colleague then checked in their own changes, and you have changes too (unsaved typing, or edits saved without checking out). **Check Out** and **Check In** then stop and ask:
+
+```
+Rupendra.agrawal changed "tax.php" in VSS after your copy was taken
+(version 6, 28-10-26 2:30p: "fix tax"). You have changes too.
+
+Do you want to keep their changes?
+
+[ Merge (Compare Both) ]  [ Keep Their Changes ]  [ Keep Only Mine ]
+```
+
+- **Merge (Compare Both)**: the file is checked out *with your changes*, and their version opens on the left (read-only) next to yours. Click the arrow next to each change you want from them, save, then **Check In**.
+- **Keep Their Changes**: your copy is replaced with their version.
+- **Keep Only Mine**: your version wins (their changes are overwritten when you check in).
+
+You are only asked when both sides changed something. If only you changed the file, Check Out keeps your changes without asking. If only they changed it, Check Out brings their version and tells you who changed it.
+
+For files you have open you also get a heads-up when someone else **checks one out** ("Ankit just checked out tax.php") or **releases** it. The release notice has *Compare With Their Version* / *Get Their Version* buttons. These come with the Explorer badge refresh. If you open a writable file that someone else has checked out (shared working folder), you are warned that your saves go into their checkout.
+
 ### Explorer badges
 
 | Badge | Meaning |
@@ -253,6 +274,7 @@ Click the status bar -> the quick menu with all VSS actions opens.
 |---|---|
 | `is not an existing filename or project` | **The mapping is wrong.** The local file path and the VSS project path do not match. Check `vssBridge.vssProject` and use `vssBridge.mappings` if needed (full example above in this README). You can also run **Test Connection & Mapping** directly from the error dialog buttons |
 | Check In says "checked out by someone else" although it is yours | Fixed in **0.2.0**: VSS user names of 14+ characters (e.g. `firstname.lastname`) were read wrongly. Also check that `vssBridge.username` is your VSS user name (the one shown in VSS Explorer), not your Windows login |
+| `A writable copy of ... already exists` | Fixed in **0.2.1**: ss.exe will not replace an edited (writable) file unless told to. Check Out / Get Latest now pass `-GWR`, and your changes are backed up and put back (or you are asked first) |
 | Every VSS command takes a minute and then says "ss.exe did not respond" | Before 0.2.0 this meant `vssBridge.username` is not a VSS user: ss.exe waited for a password. 0.2.0 shows "VSS did not accept the login" at once - fix the username/password |
 | Check In fails | (1) The file is not checked out? Since 0.1.6 the extension detects whether you have local edits and offers a smart flow that preserves them. (2) Checked out by someone else? The error names the user - ask them to check it in first. (3) Left the comment empty? That was fixed in v0.1.1 - please update. (4) For the exact error, open `VSS: Show Output Log` |
 | "Check Out and Edit" destroyed my local edits | Fixed in **0.1.6** - the Check In command on a not-checked-out file now branches: writable file (you have edits) -> smart flow with a backup/restore step that preserves your work; read-only file -> safe plain Check Out. The 0.1.5 button ran `ss Checkout` directly which overwrote the local copy |

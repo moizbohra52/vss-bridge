@@ -230,6 +230,15 @@ test('SsClient.status: a login failure throws instead of reading as "not checked
   await assert.rejects(c.status('$/x/login.php'), e => e.kind === 'auth');
 });
 
+test('SsClient: Checkout and Get replace a writable local copy (-GWR), else ss.exe refuses', async () => {
+  const c = new SsClient({ username: 'moizbohra' });
+  const seen = [];
+  c.exec = async (args) => { seen.push(args); return { code: 0, timedOut: false, output: '' }; };
+  await c.checkout('$/x/a.php', 'C:\\dev');
+  await c.get('$/x/a.php', 'C:\\dev');
+  assert.ok(seen.every(a => a.includes('-GWR')), JSON.stringify(seen));
+});
+
 test('SsClient.run: unknown user (ss.exe hangs on "Password:") fails fast as a login error', async () => {
   // Fake ss.exe: `node Status ...` runs ./Status from cwd, which prompts and hangs like ss.exe does.
   const fs = require('fs');

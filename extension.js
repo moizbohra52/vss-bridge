@@ -17,8 +17,9 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const PKG = require('./package.json');
-const { SsClient, SsError, glDir, lookupListing } = require('./lib/ssClient');
+const { SsClient, SsError, glDir, lookupListing, isSameUser } = require('./lib/ssClient');
 const { HistoryPanel } = require('./lib/historyPanel');
 const { mapToVssPath: computeVssPath, normalizeVssProject } = require('./lib/vssPaths');
 
@@ -178,7 +179,9 @@ function loadFolderStatus(folder) {
   entry.stale = false;
   const job = enqueueListing(async () => {
     try {
+      const before = entry.listing;
       entry.listing = await client.dirListing(folder);
+      if (before) { announceOthers(key, before, entry.listing); }
     } catch (err) {
       if (err instanceof SsError && err.kind === 'notfound') { entry.listing = { free: new Set(), out: [] }; }
       else { log(`Explorer status of ${folder} failed: ${err && err.message ? err.message : err}`); }
@@ -231,6 +234,136 @@ function restartBadgeTimer() {
   clearInterval(badgeTimer);
   const minutes = readConfig().explorerRefreshMinutes;
   badgeTimer = minutes > 0 ? setInterval(() => badgesChanged.fire(undefined), minutes * 60000) : null;
+}
+
+// --------------------------------------------------------------------- //
+//  Your changes vs. other people's changes                              //
+// --------------------------------------------------------------------- //
+
+const baseHashes = new Map();   // uri -> sha1 of the untouched VSS copy you opened ("your copy is based on")
+const theirVersions = new Map(); // virtual-doc uri -> text of their VSS version (left side of a compare)
+const THEIRS_SCHEME = 'vss-bridge-theirs';
+
+const sha1 = (bytes) => crypto.createHash('sha1').update(bytes).digest('hex');
+
+function readBytes(fsPath) {
+  try { return fs.readFileSync(fsPath); } catch (e) { return null; }
+}
+
+/** Remember what your copy is based on - only a read-only file is an untouched VSS version. */
+function rememberBase(uri) {
+  if (uri.scheme !== 'file' || isWritable(uri.fsPath)) { return; }
+  const bytes = readBytes(uri.fsPath);
+  if (bytes) { baseHashes.set(uri.toString(), sha1(bytes)); }
+}
+
+/** Your changes a plain ss Checkout would overwrite: unsaved editor text, or edits saved into a writable file. */
+function myChanges(uri) {
+  const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+  if (doc && doc.isDirty) { return { text: doc.getText() }; }
+  const bytes = isWritable(uri.fsPath) ? readBytes(uri.fsPath) : null;
+  return bytes ? { bytes } : null;
+}
+
+/**
+ * You have changes (`mine`) and are about to check out. If someone else checked
+ * in a newer version since your copy was taken, ask whether to keep their changes.
+ * Resolves { plan: 'mine' | 'theirs' | 'merge', theirs, latest } or null (cancelled).
+ */
+async function askAboutTheirChanges(uri, vssPath, mine) {
+  let found;
+  try {
+    found = await enqueue(async () => {
+      const st = await client.status(vssPath);
+      if (!st.exists || st.checkedOut) { return null; } // nobody can check in a checked-out file
+      return { theirs: await client.latestContent(vssPath), latest: (await client.history(vssPath, 1))[0] };
+    });
+  } catch (err) {
+    log(`Could not compare with the VSS version of ${vssPath}: ${err && err.message ? err.message : err}`);
+    found = null;
+  }
+  if (!found || !found.latest) { return { plan: 'mine' }; } // never drop your changes on a lookup hiccup
+  const { theirs, latest } = found;
+  if (mine.bytes ? mine.bytes.equals(theirs) : mine.text === theirs.toString('utf8')) {
+    return { plan: 'theirs', theirs, latest }; // identical - nothing to keep
+  }
+  const base = baseHashes.get(uri.toString());
+  const theyChanged = base ? sha1(theirs) !== base : !isSameUser(latest.user, client.username);
+  if (!theyChanged) { return { plan: 'mine', theirs, latest }; } // only you changed it
+
+  const choice = await vscode.window.showWarningMessage(
+    `${latest.user} changed "${path.basename(uri.fsPath)}" in VSS after your copy was taken ` +
+    `(version ${latest.version}, ${latest.date} ${latest.time}${latest.comment ? ': "' + latest.comment + '"' : ''}). ` +
+    'You have changes too.\n\nDo you want to keep their changes?',
+    { modal: true },
+    'Merge (Compare Both)', 'Keep Their Changes', 'Keep Only Mine'
+  );
+  const plan = { 'Merge (Compare Both)': 'merge', 'Keep Their Changes': 'theirs', 'Keep Only Mine': 'mine' }[choice];
+  return plan ? { plan, theirs, latest, asked: true } : null;
+}
+
+/** Put your changes back after ss Checkout replaced the file with the VSS version. */
+async function putMine(uri, mine) {
+  if (mine.bytes) {
+    setReadOnly(uri.fsPath, false);
+    fs.writeFileSync(uri.fsPath, mine.bytes);
+    await revertDocument(uri);
+    return;
+  }
+  // Unsaved editor text: load the checked-out file first, then lay the text over it
+  // (left unsaved, so saving does not hit VS Code's "file on disk is newer" conflict).
+  await revertDocument(uri);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), mine.text);
+  await vscode.workspace.applyEdit(edit);
+}
+
+/** Side-by-side: their VSS version (read-only, left) and your file (right). */
+async function openTheirsDiff(uri, theirs, latest, merging) {
+  const name = path.basename(uri.fsPath);
+  const left = vscode.Uri.from({ scheme: THEIRS_SCHEME, path: '/' + name, query: `v${latest.version}-${Date.now()}` });
+  theirVersions.set(left.toString(), theirs.toString('utf8'));
+  await vscode.commands.executeCommand('vscode.diff', left, uri, `${name}: ${latest.user} v${latest.version} ↔ yours`);
+  if (merging) {
+    vscode.window.showInformationMessage(
+      `Merge "${name}": the left side is ${latest.user}'s version, the right side is your file (checked out to you). ` +
+      'Use the arrow next to each change to take their lines, save, then Check In.');
+  }
+}
+
+async function compareWithLatest(uri) {
+  const vssPath = mapToVssPath(uri);
+  if (!vssPath) { return; }
+  try {
+    const [theirs, history] = await enqueue(async () =>
+      [await client.latestContent(vssPath), await client.history(vssPath, 1)]);
+    await openTheirsDiff(uri, theirs, history[0] || { version: '?', user: 'VSS' }, false);
+  } catch (err) {
+    showVssError(err, vssPath);
+  }
+}
+
+/** Heads-up when someone else checks out / releases a file you have open. */
+function announceOthers(folderKey, before, after) {
+  for (const doc of vscode.workspace.textDocuments) {
+    const loc = doc.uri.scheme === 'file' && vssLocation(doc.uri);
+    if (!loc || loc.folder.toLowerCase() !== folderKey) { continue; }
+    const was = lookupListing(before, loc.name);
+    const now = lookupListing(after, loc.name);
+    const name = path.basename(doc.uri.fsPath);
+    if (now.checkedOut && !now.byMe && !(was.checkedOut && !was.byMe)) {
+      vscode.window.showWarningMessage(
+        `VSS Bridge: ${now.user} just checked out "${name}", which you have open. Wait for their check-in before you change it.`);
+    } else if (was.checkedOut && !was.byMe && !now.checkedOut) {
+      const action = doc.isDirty ? 'Compare With Their Version' : 'Get Their Version';
+      vscode.window.showInformationMessage(
+        `VSS Bridge: ${was.user} released "${name}" (checked in, or undid the checkout), which you have open.`, action)
+        .then(c => {
+          if (c === 'Get Their Version') { doGetLatest(doc.uri); } else if (c) { compareWithLatest(doc.uri); }
+        });
+    }
+  }
 }
 
 // --------------------------------------------------------------------- //
@@ -287,6 +420,17 @@ async function handleOpenDocument(uri, source) {
   // checked out to us - open silently like Dreamweaver does.
   if (writable) {
     updateStatusBarFor(uri);
+    // ...but on a shared working folder it can be someone else's checkout.
+    if (client.configured) {
+      enqueue(() => client.status(vssPath)).then(st => {
+        statusCache.set(key, { when: Date.now(), info: st });
+        if (st.checkedOut && !st.byMe) {
+          vscode.window.showWarningMessage(
+            `VSS Bridge: "${path.basename(fsPath)}" is checked out by ${st.user}. It is editable because it is their ` +
+            'working copy - changes you save here go into their checkout.');
+        }
+      }, () => { /* status is best effort here */ });
+    }
     return;
   }
 
@@ -341,6 +485,7 @@ async function handleOpenDocument(uri, source) {
           () => client.get(vssPath, glDir(path.dirname(fsPath)))
         );
         setReadOnly(fsPath, true);
+        rememberBase(uri);
       }
       return st;
     });
@@ -407,37 +552,52 @@ function resolveTargetUri(arg) {
   return null;
 }
 
-async function doCheckout(uri, { silent = false, overwriteOk = false } = {}) {
+/**
+ * ss Checkout -I-Y replaces the local file with the latest VSS version. Your own
+ * changes (unsaved text, or edits saved into a writable file) are put back on top,
+ * unless someone else changed the file too - then you choose (askAboutTheirChanges).
+ * `decided` skips the question when the caller already asked.
+ */
+async function doCheckout(uri, { silent = false, decided = null } = {}) {
   if (!uri) { uri = resolveTargetUri(); }
   if (!uri) { return; }
   const vssPath = mapToVssPath(uri);
   if (!vssPath) { vscode.window.showErrorMessage('VSS Bridge: this file is outside the mapped workspace folder.'); return; }
+  const name = path.basename(uri.fsPath);
 
-  // ss Checkout -I-Y replaces a writable local copy, which would silently destroy local edits.
-  if (!overwriteOk && fs.existsSync(uri.fsPath) && isWritable(uri.fsPath)) {
-    const choice = await vscode.window.showWarningMessage(
-      `"${path.basename(uri.fsPath)}" is editable locally (already checked out, or it has local changes). ` +
-      'Check Out replaces it with the VSS version. Continue?',
-      { modal: true },
-      'Overwrite and Check Out'
-    );
-    if (choice !== 'Overwrite and Check Out') { return; }
+  const mine = myChanges(uri);
+  let decision = decided || { plan: mine ? 'mine' : 'theirs' };
+  if (mine && !decided) {
+    decision = await askAboutTheirChanges(uri, vssPath, mine);
+    if (!decision) { return; }
   }
 
   const key = uri.toString();
   await enqueue(async () => {
     try {
+      const before = readBytes(uri.fsPath);
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `VSS: checking out ${path.basename(uri.fsPath)}...` },
+        { location: vscode.ProgressLocation.Notification, title: `VSS: checking out ${name}...` },
         () => client.checkout(vssPath, glDir(path.dirname(uri.fsPath)))
       );
+      const fromVss = readBytes(uri.fsPath);
       setReadOnly(uri.fsPath, false);
       statusCache.delete(key);
       refreshBadges(uri);
-      await revertDocument(uri);
+      if (mine && decision.plan !== 'theirs') { await putMine(uri, mine); } else { await revertDocument(uri); }
       updateStatusBarFor(uri);
-      if (!silent) {
-        vscode.window.showInformationMessage(`VSS Bridge: "${path.basename(uri.fsPath)}" checked out - you can edit it now.`);
+      if (decision.plan === 'merge') {
+        await openTheirsDiff(uri, decision.theirs, decision.latest, true);
+      } else if (!mine && before && fromVss && !before.equals(fromVss)) {
+        // Your copy was older than VSS: say whose changes just arrived.
+        const [latest] = await client.history(vssPath, 1).catch(() => []);
+        vscode.window.showInformationMessage(
+          `VSS Bridge: "${name}" checked out. It had newer changes` +
+          (latest ? ` by ${latest.user} (version ${latest.version}, ${latest.date} ${latest.time})` : '') +
+          ' - your editor now shows them.');
+      } else if (!silent) {
+        vscode.window.showInformationMessage(`VSS Bridge: "${name}" checked out - you can edit it now.` +
+          (mine && decision.plan === 'mine' ? ' Your changes were kept.' : ''));
       }
     } catch (err) {
       handleOperationError(err, uri, vssPath, 'checkout');
@@ -526,20 +686,36 @@ async function doCheckin(uri) {
     const hasLocalEdits = fs.existsSync(uri.fsPath) && isWritable(uri.fsPath);
 
     if (hasLocalEdits) {
-      // Smart flow: preserve the user's local changes through the checkout.
-      const choice = await vscode.window.showWarningMessage(
-        `"${path.basename(uri.fsPath)}" is NOT checked out in VSS, but your local copy is editable and may contain changes.\n\n` +
-        'A normal "Check Out" would overwrite your local file with the VSS version, and your work would be LOST.\n\n' +
-        'What do you want to do?',
-        { modal: true },
-        'Check Out, Keep My Changes & Check In',
-        'Just Check Out (Discard My Changes)',
-        'Cancel'
-      );
-      if (!choice || choice === 'Cancel') { return; }
-      if (choice === 'Just Check Out (Discard My Changes)') {
-        await doCheckout(uri, { silent: false, overwriteOk: true }); // safe: pre-flight job already finished
+      // First: did someone else check in a newer version since your copy? (asks if so)
+      const decision = await askAboutTheirChanges(uri, vssPath, { bytes: readBytes(uri.fsPath) });
+      if (!decision) { return; }
+      if (decision.plan === 'theirs' && !decision.asked) {
+        setReadOnly(uri.fsPath, true);
+        rememberBase(uri);
+        vscode.window.showInformationMessage(
+          `VSS Bridge: "${path.basename(uri.fsPath)}" is identical to the latest VSS version - there is nothing to check in.`);
         return;
+      }
+      if (decision.plan !== 'mine') {
+        await doCheckout(uri, { decided: decision }); // their version, or yours + a compare view to merge
+        return;
+      }
+      if (!decision.asked) {
+        // Smart flow: preserve the user's local changes through the checkout.
+        const choice = await vscode.window.showWarningMessage(
+          `"${path.basename(uri.fsPath)}" is NOT checked out in VSS, but your local copy is editable and may contain changes.\n\n` +
+          'A normal "Check Out" would overwrite your local file with the VSS version, and your work would be LOST.\n\n' +
+          'What do you want to do?',
+          { modal: true },
+          'Check Out, Keep My Changes & Check In',
+          'Just Check Out (Discard My Changes)',
+          'Cancel'
+        );
+        if (!choice || choice === 'Cancel') { return; }
+        if (choice === 'Just Check Out (Discard My Changes)') {
+          await doCheckout(uri, { decided: { plan: 'theirs' } }); // safe: pre-flight job already finished
+          return;
+        }
       }
       await smartCheckoutAndCheckin(uri, vssPath); // smart flow (atomic, deadlock-safe)
       return;
@@ -575,6 +751,7 @@ async function doCheckin(uri) {
       statusCache.delete(key);
       handledDocs.delete(key); // next open should ask again
       refreshBadges(uri);
+      rememberBase(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       vscode.window.showInformationMessage(`VSS Bridge: "${path.basename(uri.fsPath)}" checked in successfully.`);
@@ -673,6 +850,7 @@ async function smartCheckoutAndCheckin(uri, vssPath) {
       statusCache.delete(key);
       handledDocs.delete(key);
       refreshBadges(uri);
+      rememberBase(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       log(`SMART-CHECKIN SUCCESS: ${basename}`);
@@ -730,6 +908,7 @@ async function doUndoCheckout(uri) {
       statusCache.delete(key);
       handledDocs.delete(key);
       refreshBadges(uri);
+      rememberBase(uri);
       await revertDocument(uri);
       updateStatusBarFor(uri);
       vscode.window.showInformationMessage(`VSS Bridge: checkout of "${path.basename(uri.fsPath)}" was undone.`);
@@ -764,6 +943,7 @@ async function doGetLatest(uri, { skipConfirm = false } = {}) {
         () => client.get(vssPath, glDir(path.dirname(uri.fsPath)))
       );
       if (!isWritable(uri.fsPath)) { setReadOnly(uri.fsPath, true); }
+      rememberBase(uri);
       statusCache.delete(key);
       await revertDocument(uri);
       updateStatusBarFor(uri);
@@ -907,6 +1087,7 @@ async function runBatch(op, uris) {
           if (spec.readOnly !== null) { setReadOnly(x.uri.fsPath, spec.readOnly); }
           statusCache.delete(x.uri.toString());
           if (spec.readOnly) { handledDocs.delete(x.uri.toString()); } // next open should ask again
+          rememberBase(x.uri);
           await revertDocument(x.uri);
           done++;
         } catch (err) {
@@ -1234,7 +1415,18 @@ async function activate(ctx) {
 
   // --- events ---------------------------------------------------------
   ctx.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => {
+    rememberBase(doc.uri);
     handleOpenDocument(doc.uri, 'open');
+  }));
+
+  // An editor that is clean again after a change was reloaded from disk (e.g. a
+  // colleague's check-in on a shared folder): that is now what your copy is based on.
+  ctx.subscriptions.push(vscode.workspace.onDidChangeTextDocument((e) => {
+    if (!e.document.isDirty && e.contentChanges.length) { rememberBase(e.document.uri); }
+  }));
+
+  ctx.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(THEIRS_SCHEME, {
+    provideTextDocumentContent: (u) => theirVersions.get(u.toString()) || ''
   }));
 
   ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -1259,6 +1451,7 @@ async function activate(ctx) {
   }));
 
   // --- startup --------------------------------------------------------
+  vscode.workspace.textDocuments.forEach(d => rememberBase(d.uri));
   if (vscode.window.activeTextEditor) {
     const uri = vscode.window.activeTextEditor.document.uri;
     handledDocs.add(uri.toString()); // no surprise prompt on window restore
