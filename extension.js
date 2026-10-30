@@ -18,10 +18,11 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const PKG = require('./package.json');
-const { SsClient, SsError, glDir, lookupListing, isSameUser } = require('./lib/ssClient');
+const { SsClient, SsError, glDir, lookupListing, dateKey, isSameUser } = require('./lib/ssClient');
 const { HistoryPanel } = require('./lib/historyPanel');
-const { mapToVssPath: computeVssPath, normalizeVssProject } = require('./lib/vssPaths');
+const { mapToVssPath: computeVssPath, normalizeVssProject, searchResultPaths } = require('./lib/vssPaths');
 
 const BRAND = 'Developed by Moiz Bohra';                     // author credit
 const BRAND_LINE = `VSS Bridge v${PKG.version} \u00b7 ${BRAND}`; // tooltip footer
@@ -89,6 +90,7 @@ function rebuildClient() {
   statusCache.clear();
   folderStatus.clear();
   badgesChanged.fire(undefined);
+  refreshCheckouts();
   return cfg;
 }
 
@@ -204,6 +206,7 @@ function cachedStatus(loc) {
 function refreshBadges(uri) {
   const loc = vssLocation(uri);
   if (loc && folderStatus.has(loc.folder.toLowerCase())) { loadFolderStatus(loc.folder); }
+  refreshCheckouts();
 }
 
 const badgeProvider = {
@@ -999,7 +1002,9 @@ const BATCH_OPS = {
  * single-file flow; several files or a folder (recursive) go to runBatch.
  */
 async function runOn(op, single, arg, selected) {
-  const picked = Array.isArray(selected) && selected.length ? selected : [resolveTargetUri(arg)];
+  const picked = Array.isArray(selected) && selected.length
+    ? selected.map(s => s.resourceUri || s) // items of the VSS Checkouts view carry their file as resourceUri
+    : [resolveTargetUri(arg)];
   const files = [];
   let hadFolder = false;
   for (const u of picked) {
@@ -1098,6 +1103,7 @@ async function runBatch(op, uris) {
     }));
 
   for (const f of new Set(targets.map(x => x.loc.folder))) { loadFolderStatus(f); }
+  refreshCheckouts();
   if (vscode.window.activeTextEditor) { updateStatusBarFor(vscode.window.activeTextEditor.document.uri); }
   const summary = `VSS Bridge: ${done} file(s) ${spec.done}` +
     (failed.length ? `, ${failed.length} failed` : '') + (skipped ? `, ${skipped} skipped` : '') + '.';
@@ -1120,6 +1126,29 @@ function vssRoots(cfg) {
   return all.filter((r, i) => !all.slice(0, i).some(p => inside(r, p)));
 }
 
+/** Workspace files checked out in VSS by `user` (or, without one, by anyone): [{ uri, rel, user, date, byMe }]. */
+async function findCheckouts(user) {
+  // 1. Folders holding checkouts (ss.exe can filter by user; names are cut to 19 chars).
+  const tree = new Map();
+  for (const root of vssRoots(readConfig())) {
+    for (const [folder, listing] of await enqueueListing(() => client.checkedOutBy(root, user))) {
+      if (listing.out.length) { tree.set(folder, listing); }
+    }
+  }
+  if (!tree.size) { return []; }
+  // 2. Local files in those folders whose name matches.
+  const found = (await vscode.workspace.findFiles('**/*')).map(uri => ({ uri, loc: vssLocation(uri) })).filter(x => {
+    const listing = x.loc && tree.get(x.loc.folder.toLowerCase());
+    return listing && lookupListing(listing, x.loc.name).checkedOut;
+  });
+  // 3. Exact state from the full folder listings (tells apart names that share 19 chars).
+  await Promise.all([...new Set(found.map(x => x.loc.folder))].map(loadFolderStatus));
+  return found
+    .map(({ uri, loc }) => Object.assign({ uri, rel: vscode.workspace.asRelativePath(uri) },
+      cachedStatus(loc) || lookupListing(tree.get(loc.folder.toLowerCase()), loc.name)))
+    .filter(x => x.checkedOut && (!user || x.byMe));
+}
+
 /** List every workspace file you have checked out and check in the ones you pick. */
 async function doCheckinMine() {
   const cfg = readConfig();
@@ -1128,24 +1157,7 @@ async function doCheckinMine() {
   try {
     uris = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'VSS: finding files checked out by you...' },
-      async () => {
-        // 1. Folders holding my checkouts (ss.exe filters by user; names are cut to 19 chars).
-        const mine = new Map();
-        for (const root of vssRoots(cfg)) {
-          const tree = await enqueue(() => client.checkedOutBy(root, cfg.username));
-          for (const [folder, listing] of tree) { if (listing.out.length) { mine.set(folder, listing); } }
-        }
-        if (!mine.size) { return []; }
-        // 2. Local files in those folders whose name matches.
-        const found = (await vscode.workspace.findFiles('**/*')).filter(u => {
-          const loc = vssLocation(u);
-          const listing = loc && mine.get(loc.folder.toLowerCase());
-          return listing && lookupListing(listing, loc.name).checkedOut;
-        });
-        // 3. Exact state from the full folder listings (tells apart names that share 19 chars).
-        await Promise.all([...new Set(found.map(u => vssLocation(u).folder))].map(loadFolderStatus));
-        return found.filter(u => { const st = cachedStatus(vssLocation(u)); return !st || st.byMe; });
-      });
+      async () => (await findCheckouts(cfg.username)).map(x => x.uri));
   } catch (err) {
     showVssError(err);
     return;
@@ -1158,6 +1170,131 @@ async function doCheckinMine() {
     uris.map(uri => ({ label: path.basename(uri.fsPath), description: vscode.workspace.asRelativePath(uri), picked: true, uri })),
     { canPickMany: true, placeHolder: `${uris.length} file(s) checked out by you - untick any you do not want to check in` });
   if (picks && picks.length) { await runBatch('checkin', picks.map(p => p.uri)); }
+}
+
+// --------------------------------------------------------------------- //
+//  "VSS Checkouts" view in the Explorer, sortable by date / user        //
+//  (the Explorer's own file tree cannot be sorted by an extension)      //
+// --------------------------------------------------------------------- //
+
+const CHECKOUT_SORTS = [
+  { id: 'default', label: 'Default', detail: 'Folder and file name' },
+  { id: 'date', label: 'Date', detail: 'Newest checkout first' },
+  { id: 'user', label: 'User', detail: 'Who has the file checked out, A-Z' }
+];
+const checkoutsChanged = new vscode.EventEmitter();
+let checkoutsView = null;
+let checkouts = null; // promise of findCheckouts(); null = scan again when the view is shown
+
+/** Day/month/year order of this PC's short date, which ss.exe prints dates in ('dmy' for dd-MM-yy). */
+let dateOrder = null;
+function shortDateOrder() {
+  if (!dateOrder) {
+    try {
+      const fmt = /sShortDate\s+REG_SZ\s+(.*)/.exec(execFileSync('reg',
+        ['query', 'HKCU\\Control Panel\\International', '/v', 'sShortDate'], { encoding: 'utf8', windowsHide: true }))[1];
+      dateOrder = ['d', 'M', 'y'].sort((a, b) => fmt.indexOf(a) - fmt.indexOf(b)).join('').toLowerCase();
+    } catch (e) {
+      dateOrder = 'dmy';
+    }
+  }
+  return dateOrder;
+}
+
+const checkoutsProvider = {
+  onDidChangeTreeData: checkoutsChanged.event,
+  getTreeItem: (item) => item,
+  async getChildren() {
+    if (!client.configured) { checkoutsView.message = 'VSS Bridge is not configured yet (VSS: Open Settings).'; return []; }
+    let list;
+    try {
+      list = await (checkouts = checkouts || vscode.window.withProgress(
+        { location: { viewId: 'vssBridge.checkouts' } }, () => findCheckouts()));
+    } catch (err) {
+      checkouts = null;
+      showVssError(err);
+      return [];
+    }
+    const sort = context.workspaceState.get('checkoutsSort', 'default');
+    const byPath = (a, b) => a.rel.localeCompare(b.rel);
+    const order = sort === 'date' ? shortDateOrder() : null;
+    const compare = sort === 'date' ? (a, b) => dateKey(b.date, order) - dateKey(a.date, order) || byPath(a, b)
+      : sort === 'user' ? (a, b) => a.user.localeCompare(b.user, undefined, { sensitivity: 'base' }) || byPath(a, b)
+      : byPath;
+    checkoutsView.description = sort === 'default' ? '' : 'by ' + sort;
+    checkoutsView.message = list.length ? undefined : 'No files are checked out in the mapped VSS project(s).';
+    return [...list].sort(compare).map(x => {
+      const item = new vscode.TreeItem(x.uri);
+      const dir = path.dirname(x.rel);
+      item.description = [x.user, x.date, dir === '.' ? '' : dir].filter(Boolean).join(' · ');
+      item.tooltip = `${x.rel}\nChecked out by ${x.byMe ? 'you' : x.user} on ${x.date}`;
+      item.contextValue = x.byMe ? 'mine' : 'other';
+      item.command = { command: 'vscode.open', title: 'Open', arguments: [x.uri] };
+      return item;
+    });
+  }
+};
+
+/** Scan again now if the view is showing, otherwise the next time it is shown. */
+function refreshCheckouts() {
+  checkouts = null;
+  if (checkoutsView && checkoutsView.visible) { checkoutsChanged.fire(undefined); }
+}
+
+async function pickCheckoutsSort() {
+  const current = context.workspaceState.get('checkoutsSort', 'default');
+  const pick = await vscode.window.showQuickPick(
+    CHECKOUT_SORTS.map(s => Object.assign({ description: s.id === current ? '(current)' : '' }, s)),
+    { placeHolder: 'Sort the VSS Checkouts view by' });
+  if (!pick) { return; }
+  await context.workspaceState.update('checkoutsSort', pick.id);
+  checkoutsChanged.fire(undefined); // same list, new order - no ss.exe call
+  vscode.commands.executeCommand('vssBridge.checkouts.focus');
+}
+
+// --------------------------------------------------------------------- //
+//  Every file in the Search view's results at once                      //
+// --------------------------------------------------------------------- //
+
+/**
+ * There is no extension API for the Search view's results, so the view's own
+ * "Get Search Results" command supplies them as text (the format of "Copy All").
+ */
+async function searchResultFiles() {
+  // Both commands below read the Search view only while it is shown.
+  await vscode.commands.executeCommand('workbench.view.search.focus').then(undefined, () => { /* best effort */ });
+  let text;
+  try {
+    text = await vscode.commands.executeCommand('search.action.getSearchResults');
+  } catch (e) {
+    text = await copyAllSearchResults(); // VS Code without that command
+  }
+  const folders = (vscode.workspace.workspaceFolders || []).map(f => ({ name: f.name, fsPath: f.uri.fsPath }));
+  return searchResultPaths(text, folders).map(p => vscode.Uri.file(p));
+}
+
+/**
+ * Older VS Code: run the Search view's "Copy All" and put your clipboard text back.
+ * shortcut: Copy All stops at 10,000 matched lines there, and a copied image is not restored.
+ */
+async function copyAllSearchResults() {
+  const saved = await vscode.env.clipboard.readText();
+  try {
+    await vscode.env.clipboard.writeText(''); // no results must not read as your old clipboard
+    await vscode.commands.executeCommand('search.action.copyAll');
+    return await vscode.env.clipboard.readText();
+  } finally {
+    await vscode.env.clipboard.writeText(saved);
+  }
+}
+
+async function runOnSearchResults(op, single) {
+  const uris = await searchResultFiles();
+  if (!uris.length) {
+    vscode.window.showInformationMessage('VSS Bridge: the Search view has no results. Search for something first, then run this again.');
+    return;
+  }
+  await runOn(op, single, null, uris);
 }
 
 /**
@@ -1385,6 +1522,9 @@ async function activate(ctx) {
   reg('vssBridge.undoCheckout', (arg, all) => runOn('undo', doUndoCheckout, arg, all));
   reg('vssBridge.getLatest', (arg, all) => runOn('get', doGetLatest, arg, all));
   reg('vssBridge.checkinMine', () => doCheckinMine());
+  reg('vssBridge.checkoutSearchResults', () => runOnSearchResults('checkout', doCheckout));
+  reg('vssBridge.checkinSearchResults', () => runOnSearchResults('checkin', doCheckin));
+  reg('vssBridge.sortCheckouts', () => pickCheckoutsSort());
   reg('vssBridge.history', (arg) => doShowHistory(resolveTargetUri(arg)));
   reg('vssBridge.openPrompt', (arg) => doOpenPrompt(resolveTargetUri(arg)));
   reg('vssBridge.refreshStatus', (arg) => {
@@ -1392,6 +1532,7 @@ async function activate(ctx) {
     if (uri) { statusCache.delete(uri.toString()); updateStatusBarFor(uri); }
     for (const e of folderStatus.values()) { e.stale = true; }
     badgesChanged.fire(undefined);
+    refreshCheckouts();
   });
   reg('vssBridge.configure', async () => {
     const cfgNow = readConfig();
@@ -1412,6 +1553,11 @@ async function activate(ctx) {
     badgesChanged,
     { dispose: () => clearInterval(badgeTimer) });
   restartBadgeTimer();
+
+  // --- VSS Checkouts view (Explorer) ----------------------------------
+  checkoutsView = vscode.window.createTreeView('vssBridge.checkouts', { treeDataProvider: checkoutsProvider, canSelectMany: true });
+  ctx.subscriptions.push(checkoutsView, checkoutsChanged,
+    checkoutsView.onDidChangeVisibility(e => { if (e.visible && !checkouts) { checkoutsChanged.fire(undefined); } }));
 
   // --- events ---------------------------------------------------------
   ctx.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => {

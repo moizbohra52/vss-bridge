@@ -23,6 +23,10 @@ Just like Dreamweaver asks "View or Check Out?" the moment you open a file with 
 | **Explorer badges** | Files checked out in VSS get a ✓ in the Explorer: **green** = checked out by you (parent folders turn green too), **red** = checked out by someone else (hover to see who) |
 | **Multiple files at once** | Select several files or a folder in the Explorer -> Check Out / Check In / Undo Checkout / Get Latest. One comment for the whole check-in |
 | **Check In My Checkouts** | One list of every file you have checked out - untick what you want to keep and check in the rest |
+| **Search results in one click** | Search in VS Code, then Check Out or Check In every file in the results with one button in the Search view |
+| **VSS Checkouts view** | A list in the Explorer of every checked-out file (yours and other people's), sortable by **date**, **user** or **default** (folder and name) |
+| **Editor tab buttons** | Check Out / Check In buttons at the top right of every open file |
+| **Keyboard shortcuts** | `Ctrl+Alt+V` then one key for every VSS action (see the table below) |
 
 ## Requirements
 
@@ -203,6 +207,16 @@ If the file is NOT checked out and you have **no local edits** (read-only pristi
 - Check In asks for **one comment** for all files. If some files are editable locally, Check Out / Get Latest ask before overwriting them (**Overwrite** or **Skip Editable Files**).
 - A progress notification shows `3/12 file.php` and can be cancelled. At the end you get a summary (`10 checked in, 2 failed`) with a button to the Output log.
 - **VSS: Check In My Checkouts...** (Command Palette, status bar menu or Explorer right-click) lists every workspace file you have checked out, all ticked. Untick the ones to keep and press Enter.
+- **Search results**: search in the Search view (`Ctrl+Shift+F`), then click the ✎ (**Check Out All Search Results**) or ☁ (**Check In All Search Results**) button at the top of the Search view. Every file in the results goes through the same multi-file flow as above. Shortcuts: `Ctrl+Alt+V` `Shift+O` / `Ctrl+Alt+V` `Shift+I`.
+- On an open file, the **✎ Check Out** and **☁ Check In** buttons sit at the top right of the editor, next to the tabs.
+
+### VSS Checkouts view (sort by date / user)
+
+The Explorer has a **VSS Checkouts** section (collapsed at first - click to open it). It lists every workspace file that is checked out in VSS, by you or anyone else, as `user · date · folder`.
+
+- The sort button at the top picks the order: **Date** (newest checkout first), **User** (A-Z), or **Default** (folder and file name). The choice is remembered per workspace.
+- Click a file to open it. Right-click your own files for **Check In** / **Undo Checkout** (also as an inline button), any file for **Show History**. Ctrl/Shift-click to select several.
+- The list is read from VSS when you open the section, after your own VSS actions, and with the refresh button. VS Code's own Explorer tree cannot be re-sorted by an extension, which is why this is a separate list.
 
 ### When someone else changed the same file
 
@@ -259,14 +273,43 @@ Click the status bar -> the quick menu with all VSS actions opens.
 | `VSS: Check Out` | Check out (on a file or Explorer selection) |
 | `VSS: Check In` | Check in with a comment |
 | `VSS: Check In My Checkouts...` | Pick from every file you have checked out and check them in together |
+| `VSS: Check Out All Search Results` | Check out every file in the Search view's results |
+| `VSS: Check In All Search Results` | Check in every file in the Search view's results (one comment) |
+| `VSS: Sort Checkouts (Date / User / Default)...` | Order of the VSS Checkouts view |
 | `VSS: Undo Checkout` | Discard changes and release the lock |
 | `VSS: Get Latest Version` | Pull the latest copy from VSS |
 | `VSS: Show History` | Open the history panel |
 | `VSS: View or Check Out...` | Show the open prompt again |
-| `VSS: Refresh Status` | Re-read the status bar and Explorer badges from VSS |
+| `VSS: Actions for This File...` | The quick menu of the status bar |
+| `VSS: Refresh Status` | Re-read the status bar, Explorer badges and VSS Checkouts view from VSS |
 | `VSS: Test Connection & Mapping` | Step-by-step diagnosis: ss.exe, srcsafe.ini, login, file mapping |
 | `VSS: Show Output Log` | Full log of ss.exe commands (debugging) |
 | `VSS: Open Settings` | Open the extension settings |
+
+### Keyboard shortcuts
+
+Press `Ctrl+Alt+V`, let go, then press the second key. File commands work on the active editor.
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Alt+V` `O` | Check Out |
+| `Ctrl+Alt+V` `I` | Check In |
+| `Ctrl+Alt+V` `U` | Undo Checkout |
+| `Ctrl+Alt+V` `G` | Get Latest Version |
+| `Ctrl+Alt+V` `H` | Show History |
+| `Ctrl+Alt+V` `P` | View or Check Out... (the open prompt) |
+| `Ctrl+Alt+V` `M` | Check In My Checkouts... |
+| `Ctrl+Alt+V` `Shift+O` | Check Out All Search Results |
+| `Ctrl+Alt+V` `Shift+I` | Check In All Search Results |
+| `Ctrl+Alt+V` `C` | Show the VSS Checkouts view |
+| `Ctrl+Alt+V` `S` | Sort the VSS Checkouts view |
+| `Ctrl+Alt+V` `R` | Refresh Status |
+| `Ctrl+Alt+V` `V` | Quick menu with all actions |
+| `Ctrl+Alt+V` `T` | Test Connection & Mapping |
+| `Ctrl+Alt+V` `L` | Show Output Log |
+| `Ctrl+Alt+V` `,` | Open Settings |
+
+To change a key: `File > Preferences > Keyboard Shortcuts`, search for `VSS`.
 
 ## Troubleshooting
 

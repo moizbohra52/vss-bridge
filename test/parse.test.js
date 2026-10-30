@@ -13,8 +13,10 @@ const {
   parseHistoryOutput,
   parseDirListing,
   lookupListing,
+  dateKey,
   glDir
 } = require('../lib/ssClient');
+const { searchResultPaths } = require('../lib/vssPaths');
 
 let passed = 0;
 let failed = 0;
@@ -214,6 +216,51 @@ test('lookupListing: cut name resolves to the checked-out file, not its free sib
   assert.strictEqual(st.user, 'otheruser');
   assert.strictEqual(lookupListing(api, 'login.php').byMe, true);
   assert.strictEqual(lookupListing(api, 'new_local_file.php').exists, false);
+});
+
+test('lookupListing: carries the checkout date and time', () => {
+  const api = parseDirListing(DIR_E, 'moizbohra').get('$/myapp/api');
+  assert.strictEqual(lookupListing(api, 'errorhandle.php').date, '26-10-26 5:44p');
+  assert.strictEqual(lookupListing(api, 'login.php').date, '7-08-25 4:31p');
+});
+
+test('dateKey: sorts by year, month, day, then 12h / 24h time', () => {
+  const sorted = ['27-10-26 3:50p', '7-08-25 4:31p', '27-10-26 12:11p', '26-10-26 11:59p', '27-10-26 9:05a']
+    .sort((a, b) => dateKey(a, 'dmy') - dateKey(b, 'dmy'));
+  assert.deepStrictEqual(sorted, ['7-08-25 4:31p', '26-10-26 11:59p', '27-10-26 9:05a', '27-10-26 12:11p', '27-10-26 3:50p']);
+  assert.strictEqual(dateKey('10/27/26 3:50p', 'mdy'), dateKey('27-10-26 15:50', 'dmy'));
+  assert.strictEqual(dateKey('27-Oct-26 3:50p', 'dmy'), dateKey('2026-10-27 15:50', 'dmy')); // 4-digit year first = y-m-d
+  assert.strictEqual(dateKey('27.10.2026 15.50', 'dmy'), dateKey('26/10/27 3:50p', 'ymd'));
+  assert.strictEqual(dateKey('', 'dmy'), 0);
+});
+
+test('SsClient.checkedOutBy: -U only when a user is given (none = everyone)', async () => {
+  const c = new SsClient({ username: 'moizbohra' });
+  const seen = [];
+  c.exec = async (args) => { seen.push(args); return { code: 0, timedOut: false, output: DIR_E }; };
+  await c.checkedOutBy('$/MyApp', 'moizbohra');
+  await c.checkedOutBy('$/MyApp');
+  assert.ok(seen[0].includes('-Umoizbohra'));
+  assert.ok(!seen[1].some(a => /^-U/.test(a)), JSON.stringify(seen[1]));
+});
+
+test('searchResultPaths: file lines of Search "Copy All", match lines skipped', () => {
+  const folders = [{ name: 'api', fsPath: 'C:\\dev\\api' }, { name: 'web', fsPath: 'D:\\web' }];
+  const copied = [
+    'src\\login.php',
+    '  12,5: $user = login();',
+    '  13: continued match line',
+    '',
+    'web \u2022 js\\app.js',
+    '  3,1: login()',
+    '',
+    'E:\\other\\x.php',
+    '  1,1: login'
+  ].join('\r\n');
+  assert.deepStrictEqual(searchResultPaths(copied, folders),
+    ['C:\\dev\\api\\src\\login.php', 'D:\\web\\js\\app.js', 'E:\\other\\x.php']);
+  assert.deepStrictEqual(searchResultPaths('', folders), []);
+  assert.deepStrictEqual(searchResultPaths('a.php\r\n  1,1: x', []), []); // no workspace: relative path cannot be placed
 });
 
 test('SsClient.status: exit 1 = checked out, not-found = exists false', async () => {

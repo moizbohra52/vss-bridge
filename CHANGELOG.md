@@ -2,6 +2,14 @@
 
 All notable changes to the VSS Bridge extension are documented here.
 
+## [Unreleased]
+
+### Added
+- **Check Out / Check In all search results**: two buttons at the top of the Search view act on every file in the current results, through the usual multi-file flow (one comment, skips files where the action does not apply).
+- **VSS Checkouts view** in the Explorer: every checked-out workspace file (yours and other people's) with user, date and folder. A sort button orders it by **Date** (newest first), **User** or **Default** (folder and name); the choice is kept per workspace. Check In / Undo Checkout / Show History on right-click, multi-select supported. Dates are read in this PC's short-date order, the same one ss.exe prints.
+- **Check Out / Check In buttons** on the editor title bar of every open file.
+- **Keyboard shortcuts** for every command: `Ctrl+Alt+V` followed by one key (`O` check out, `I` check in, `U` undo, `G` get latest, `H` history, `Shift+O` / `Shift+I` search results, `S` sort checkouts, ... see the README).
+
 ## [0.2.1] - 2026-10-28
 
 ### Added

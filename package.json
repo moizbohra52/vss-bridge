@@ -2,7 +2,7 @@
   "name": "vss-bridge",
   "displayName": "VSS Bridge (Visual SourceSafe)",
   "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands, multi-file check in/out, and Explorer badges for checked-out files. Developed by Moiz Bohra.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "MoizBohra",
   "author": {
     "name": "Moiz Bohra"
@@ -147,16 +147,41 @@
       {
         "command": "vssBridge.checkout",
         "title": "VSS: Check Out",
-        "category": "VSS Bridge"
+        "category": "VSS Bridge",
+        "icon": "$(pencil)"
       },
       {
         "command": "vssBridge.checkin",
         "title": "VSS: Check In",
-        "category": "VSS Bridge"
+        "category": "VSS Bridge",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "vssBridge.checkinMine",
         "title": "VSS: Check In My Checkouts...",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.checkoutSearchResults",
+        "title": "VSS: Check Out All Search Results",
+        "category": "VSS Bridge",
+        "icon": "$(pencil)"
+      },
+      {
+        "command": "vssBridge.checkinSearchResults",
+        "title": "VSS: Check In All Search Results",
+        "category": "VSS Bridge",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "vssBridge.sortCheckouts",
+        "title": "VSS: Sort Checkouts (Date / User / Default)...",
+        "category": "VSS Bridge",
+        "icon": "$(sort-precedence)"
+      },
+      {
+        "command": "vssBridge.quickMenu",
+        "title": "VSS: Actions for This File...",
         "category": "VSS Bridge"
       },
       {
@@ -182,7 +207,8 @@
       {
         "command": "vssBridge.refreshStatus",
         "title": "VSS: Refresh Status",
-        "category": "VSS Bridge"
+        "category": "VSS Bridge",
+        "icon": "$(refresh)"
       },
       {
         "command": "vssBridge.configure",
@@ -200,6 +226,15 @@
         "category": "VSS Bridge"
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "vssBridge.checkouts",
+          "name": "VSS Checkouts",
+          "visibility": "collapsed"
+        }
+      ]
+    },
     "menus": {
       "explorer/context": [
         {
@@ -258,8 +293,130 @@
           "command": "vssBridge.openPrompt",
           "group": "vss@6"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "vssBridge.checkout",
+          "group": "navigation@90",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "vssBridge.checkin",
+          "group": "navigation@91",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vssBridge.checkoutSearchResults",
+          "group": "navigation@50",
+          "when": "view == workbench.view.search"
+        },
+        {
+          "command": "vssBridge.checkinSearchResults",
+          "group": "navigation@51",
+          "when": "view == workbench.view.search"
+        },
+        {
+          "command": "vssBridge.sortCheckouts",
+          "group": "navigation@1",
+          "when": "view == vssBridge.checkouts"
+        },
+        {
+          "command": "vssBridge.refreshStatus",
+          "group": "navigation@2",
+          "when": "view == vssBridge.checkouts"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vssBridge.checkin",
+          "group": "inline",
+          "when": "view == vssBridge.checkouts && viewItem == mine"
+        },
+        {
+          "command": "vssBridge.checkin",
+          "group": "vss@1",
+          "when": "view == vssBridge.checkouts && viewItem == mine"
+        },
+        {
+          "command": "vssBridge.undoCheckout",
+          "group": "vss@2",
+          "when": "view == vssBridge.checkouts && viewItem == mine"
+        },
+        {
+          "command": "vssBridge.history",
+          "group": "vss@3",
+          "when": "view == vssBridge.checkouts"
+        }
       ]
     },
+    "keybindings": [
+      {
+        "command": "vssBridge.checkout",
+        "key": "ctrl+alt+v o"
+      },
+      {
+        "command": "vssBridge.checkin",
+        "key": "ctrl+alt+v i"
+      },
+      {
+        "command": "vssBridge.undoCheckout",
+        "key": "ctrl+alt+v u"
+      },
+      {
+        "command": "vssBridge.getLatest",
+        "key": "ctrl+alt+v g"
+      },
+      {
+        "command": "vssBridge.history",
+        "key": "ctrl+alt+v h"
+      },
+      {
+        "command": "vssBridge.openPrompt",
+        "key": "ctrl+alt+v p"
+      },
+      {
+        "command": "vssBridge.checkinMine",
+        "key": "ctrl+alt+v m"
+      },
+      {
+        "command": "vssBridge.checkoutSearchResults",
+        "key": "ctrl+alt+v shift+o"
+      },
+      {
+        "command": "vssBridge.checkinSearchResults",
+        "key": "ctrl+alt+v shift+i"
+      },
+      {
+        "command": "vssBridge.checkouts.focus",
+        "key": "ctrl+alt+v c"
+      },
+      {
+        "command": "vssBridge.sortCheckouts",
+        "key": "ctrl+alt+v s"
+      },
+      {
+        "command": "vssBridge.refreshStatus",
+        "key": "ctrl+alt+v r"
+      },
+      {
+        "command": "vssBridge.quickMenu",
+        "key": "ctrl+alt+v v"
+      },
+      {
+        "command": "vssBridge.testConnection",
+        "key": "ctrl+alt+v t"
+      },
+      {
+        "command": "vssBridge.showLog",
+        "key": "ctrl+alt+v l"
+      },
+      {
+        "command": "vssBridge.configure",
+        "key": "ctrl+alt+v ,"
+      }
+    ],
     "colors": [
       {
         "id": "vssBridge.checkedOutByMe",
