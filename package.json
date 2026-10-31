@@ -2,7 +2,7 @@
   "name": "vss-bridge",
   "displayName": "VSS Bridge (Visual SourceSafe)",
   "description": "Dreamweaver-style Visual SourceSafe integration for VS Code. Asks 'View or Check Out?' when you open a file, and adds Check In, Undo Checkout, Get Latest and History commands, multi-file check in/out, and Explorer badges for checked-out files. Developed by Moiz Bohra.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "MoizBohra",
   "author": {
     "name": "Moiz Bohra"
