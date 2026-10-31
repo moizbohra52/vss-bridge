@@ -5,6 +5,7 @@ All notable changes to the VSS Bridge extension are documented here.
 ## [Unreleased]
 
 ### Added
+- **AI check-in comments**: a ✨ button in every check-in comment box (single file, smart check-in, multi-file) writes the comment from what you changed since checkout (VSS version vs your file). Works with OpenAI or any OpenAI-compatible API (OpenRouter, Groq, Ollama, LM Studio...), Anthropic, Azure OpenAI and Google Gemini: settings `vssBridge.ai.provider` / `endpoint` / `model`, key via **VSS: Set AI API Key** (stored encrypted, not in settings.json).
 - **Check Out / Check In all search results**: two buttons at the top of the Search view act on every file in the current results, through the usual multi-file flow (one comment, skips files where the action does not apply).
 - **VSS Checkouts view** in the Explorer: every checked-out workspace file (yours and other people's) with user, date and folder. A sort button orders it by **Date** (newest first), **User** or **Default** (folder and name); the choice is kept per workspace. Check In / Undo Checkout / Show History on right-click, multi-select supported. Dates are read in this PC's short-date order, the same one ss.exe prints.
 - **Check Out / Check In buttons** on the editor title bar of every open file.

@@ -286,6 +286,21 @@ test('SsClient: Checkout and Get replace a writable local copy (-GWR), else ss.e
   assert.ok(seen.every(a => a.includes('-GWR')), JSON.stringify(seen));
 });
 
+// Fails only on VS Code's Node (24.22): run `ELECTRON_RUN_AS_NODE=1 Code.exe test/parse.test.js` too.
+test('SsClient.latestContent: returns the file although ss Get left it read-only', async () => {
+  const fs = require('fs');
+  const c = new SsClient({ username: 'moizbohra' });
+  let dir = '';
+  c.get = async (vssPath, localDir) => {
+    dir = localDir;
+    const f = require('path').join(localDir, 'login.php');
+    fs.writeFileSync(f, 'v5');
+    fs.chmodSync(f, 0o444); // like ss Get: the file is not checked out, so read-only
+  };
+  assert.strictEqual((await c.latestContent('$/x/login.php')).toString(), 'v5');
+  assert.ok(!fs.existsSync(dir), 'temp folder removed');
+});
+
 test('SsClient.run: unknown user (ss.exe hangs on "Password:") fails fast as a login error', async () => {
   // Fake ss.exe: `node Status ...` runs ./Status from cwd, which prompts and hangs like ss.exe does.
   const fs = require('fs');
@@ -429,6 +444,117 @@ test('SsClient: configured flag requires db + user', () => {
   assert.strictEqual(c.configured, false);
   const c2 = new SsClient({ ssExePath: 'ss.exe', databasePath: '\\\\srv\\vss', username: 'moizbohra' });
   assert.strictEqual(c2.configured, true);
+});
+
+// ------------------------------------------------------------------ //
+//  AI check-in comments                                              //
+// ------------------------------------------------------------------ //
+
+const { describeChange, buildRequest, readReply, generateComment } = require('../lib/aiClient');
+const WORDS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet'];
+
+test('describeChange: sends only the changed lines plus 3 lines of context', () => {
+  const after = WORDS.map(w => (w === 'echo' ? 'ECHO' : w));
+  const d = describeChange('api/login.php', Buffer.from(WORDS.join('\n')), Buffer.from(after.join('\r\n')));
+  assert.ok(d.includes('api/login.php') && d.includes('echo') && d.includes('ECHO'), d);
+  assert.ok(d.includes('bravo') && d.includes('hotel'), 'context lines kept: ' + d);
+  assert.ok(!d.includes('alpha') && !d.includes('india'), 'far lines dropped: ' + d);
+});
+
+test('describeChange: unchanged file (CRLF vs LF only) -> null', () => {
+  assert.strictEqual(describeChange('a.php', Buffer.from('x\r\ny\r\n'), Buffer.from('x\ny\n')), null);
+});
+
+test('describeChange: binary file is named, not dumped', () => {
+  const d = describeChange('logo.png', Buffer.from([0x89, 0x50, 0, 1]), Buffer.from([0x89, 0x50, 0, 2]));
+  assert.ok(d.includes('logo.png') && /binary/i.test(d), d);
+});
+
+test('describeChange: a huge change is clipped', () => {
+  const d = describeChange('big.php', Buffer.from('a'), Buffer.from('b\n'.repeat(50000)));
+  assert.ok(d.length < 13000, String(d.length));
+});
+
+test('buildRequest: OpenAI-compatible default URL, custom endpoint, no key = no auth header', () => {
+  const r = buildRequest({ provider: 'openai', endpoint: '', model: 'gpt-x' }, 'k1', 'CHANGES');
+  assert.strictEqual(r.url, 'https://api.openai.com/v1/chat/completions');
+  assert.strictEqual(r.headers.Authorization, 'Bearer k1');
+  assert.strictEqual(r.body.model, 'gpt-x');
+  assert.strictEqual(r.body.messages[1].content, 'CHANGES');
+  const local = buildRequest({ provider: 'openai', endpoint: 'http://localhost:11434/v1/', model: 'llama' }, '', 'C');
+  assert.strictEqual(local.url, 'http://localhost:11434/v1/chat/completions');
+  assert.ok(!('Authorization' in local.headers));
+  const full = buildRequest({ provider: 'openai', endpoint: 'https://x.io/v1/chat/completions', model: 'm' }, 'k', 'C');
+  assert.strictEqual(full.url, 'https://x.io/v1/chat/completions');
+});
+
+test('buildRequest: Anthropic messages API', () => {
+  const r = buildRequest({ provider: 'anthropic', endpoint: '', model: 'claude-x' }, 'k2', 'CHANGES');
+  assert.strictEqual(r.url, 'https://api.anthropic.com/v1/messages');
+  assert.strictEqual(r.headers['x-api-key'], 'k2');
+  assert.strictEqual(r.headers['anthropic-version'], '2023-06-01');
+  assert.ok(r.body.max_tokens > 0 && r.body.system);
+  assert.strictEqual(r.body.messages[0].content, 'CHANGES');
+});
+
+test('buildRequest: Azure uses the pasted URL and an api-key header; needs the URL', () => {
+  const url = 'https://res.openai.azure.com/openai/deployments/gpt/chat/completions?api-version=2024-10-21';
+  const r = buildRequest({ provider: 'azure', endpoint: url, model: '' }, 'k3', 'C');
+  assert.strictEqual(r.url, url);
+  assert.strictEqual(r.headers['api-key'], 'k3');
+  assert.ok(!('model' in r.body));
+  assert.throws(() => buildRequest({ provider: 'azure', endpoint: '', model: '' }, 'k3', 'C'), /endpoint/i);
+});
+
+test('buildRequest: Gemini generateContent', () => {
+  const r = buildRequest({ provider: 'gemini', endpoint: '', model: 'gemini-x' }, 'k4', 'CHANGES');
+  assert.strictEqual(r.url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent');
+  assert.strictEqual(r.headers['x-goog-api-key'], 'k4');
+  assert.strictEqual(r.body.contents[0].parts[0].text, 'CHANGES');
+});
+
+test('buildRequest: model is required (except Azure)', () => {
+  for (const provider of ['openai', 'anthropic', 'gemini']) {
+    assert.throws(() => buildRequest({ provider, endpoint: '', model: '' }, 'k', 'C'), /model/i, provider);
+  }
+});
+
+test('readReply: each provider shape, cleaned to one line', () => {
+  assert.strictEqual(readReply('openai', { choices: [{ message: { content: '"Fixed login"\n' } }] }), 'Fixed login');
+  assert.strictEqual(readReply('azure', { choices: [{ message: { content: 'A\nB' } }] }), 'A B');
+  assert.strictEqual(readReply('anthropic', { content: [{ type: 'text', text: 'Added export' }] }), 'Added export');
+  assert.strictEqual(readReply('gemini', { candidates: [{ content: { parts: [{ text: '`Tidy` ' }] } }] }), 'Tidy');
+  assert.strictEqual(readReply('openai', { choices: [{ message: { content: '<think>hmm\nok</think>\nFix typo' } }] }), 'Fix typo');
+  assert.throws(() => readReply('openai', { choices: [] }), /empty/i);
+});
+
+test('generateComment: posts to the endpoint and returns the comment; API errors carry their message', async () => {
+  const http = require('http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      seen.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(body) });
+      if (req.headers.authorization === 'Bearer bad') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Incorrect API key' } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Fixed null check in login' } }] }));
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const ai = { provider: 'openai', endpoint: `http://127.0.0.1:${server.address().port}/v1`, model: 'm' };
+  try {
+    assert.strictEqual(await generateComment(ai, 'good', ['### a.php\nchange']), 'Fixed null check in login');
+    assert.strictEqual(seen[0].url, '/v1/chat/completions');
+    assert.ok(seen[0].body.messages[1].content.includes('### a.php'));
+    await assert.rejects(generateComment(ai, 'bad', ['x']), /401.*Incorrect API key/);
+  } finally {
+    server.close();
+  }
 });
 
 // ------------------------------------------------------------------ //

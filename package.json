@@ -140,6 +140,33 @@
           "default": 5,
           "minimum": 0,
           "description": "How often the Explorer badges of visible folders are re-read from VSS, to pick up other people's checkouts. 0 = only after your own VSS actions and \"VSS: Refresh Status\"."
+        },
+        "vssBridge.ai.provider": {
+          "type": "string",
+          "enum": [
+            "openai",
+            "anthropic",
+            "azure",
+            "gemini"
+          ],
+          "enumDescriptions": [
+            "OpenAI, or any OpenAI-compatible API: OpenRouter, Groq, DeepSeek, Ollama, LM Studio...",
+            "Anthropic (Claude)",
+            "Azure OpenAI",
+            "Google Gemini"
+          ],
+          "default": "openai",
+          "description": "AI used by the ✨ button of the check-in comment box: it reads what you changed since checkout and writes the comment. Your changed code is sent to this provider. The API key is set with \"VSS: Set AI API Key\" and stored encrypted by VS Code, not in settings.json."
+        },
+        "vssBridge.ai.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "API base URL. Empty = the provider's own (https://api.openai.com/v1, https://api.anthropic.com, https://generativelanguage.googleapis.com/v1beta). Examples: http://localhost:11434/v1 (Ollama), https://openrouter.ai/api/v1. Azure: paste the full chat completions URL from the Azure portal, e.g. https://myres.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+        },
+        "vssBridge.ai.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name, e.g. gpt-4o-mini, claude-haiku-5-5, gemini-2.5-flash, llama3.1. Azure: the deployment name (can stay empty when the endpoint URL already names the deployment)."
         }
       }
     },
@@ -223,6 +250,11 @@
       {
         "command": "vssBridge.showLog",
         "title": "VSS: Show Output Log",
+        "category": "VSS Bridge"
+      },
+      {
+        "command": "vssBridge.setAiKey",
+        "title": "VSS: Set AI API Key",
         "category": "VSS Bridge"
       }
     ],

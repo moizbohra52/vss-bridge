@@ -95,6 +95,9 @@ After installing, configure the settings once. Open `File > Preferences > Settin
 | `vssBridge.statusBarEnabled` | `true` | Status bar indicator |
 | `vssBridge.explorerDecorations` | `true` | ✓ badges on checked-out files in the Explorer |
 | `vssBridge.explorerRefreshMinutes` | `5` | How often visible folders are re-read to pick up other people's checkouts (`0` = only after your own actions and **VSS: Refresh Status**) |
+| `vssBridge.ai.provider` | `openai` | AI for the ✨ check-in comment button: `openai` (or any OpenAI-compatible API), `anthropic`, `azure`, `gemini` |
+| `vssBridge.ai.endpoint` | (empty) | API base URL; empty = the provider's own. Azure: the full chat completions URL from the portal |
+| `vssBridge.ai.model` | (empty) | Model name (Azure: deployment name) |
 
 ### Understanding vssProject mapping (important - fixes "is not an existing filename")
 
@@ -179,6 +182,10 @@ You opened "login.frm" from VSS. How do you want to continue?
 - **Right-click the file -> VSS: Check In** (or click the status bar and choose it from the menu)
 - A comment box appears - whatever you type goes into the VSS history
 - After check in, the file becomes read-only again
+
+**Let AI write the comment:** click the ✨ button at the top of the comment box. The extension compares each file being checked in with its VSS version (what you checked out), sends only the changed parts to the AI you configured, and puts a detailed summary in the box (`Added: ...; Removed: ...; Changed: ...; Why: ...`, on one line because VSS stores comments on one line) - edit it if you like, then press Enter. Works for multi-file check-ins too (one comment for all files).
+
+Set it up once: pick `vssBridge.ai.provider`, `vssBridge.ai.model` (and `vssBridge.ai.endpoint` for Azure, Ollama, OpenRouter...), then run **VSS: Set AI API Key** - or just click ✨ and it asks for the key. The key is stored encrypted by VS Code, not in `settings.json`. Your changed code is sent to that provider, so use a local model (Ollama, LM Studio) if your code may not leave the office.
 
 **If you forgot to check out first** but already have local edits, the extension detects this and offers a **smart flow**:
 
@@ -284,6 +291,7 @@ Click the status bar -> the quick menu with all VSS actions opens.
 | `VSS: Refresh Status` | Re-read the status bar, Explorer badges and VSS Checkouts view from VSS |
 | `VSS: Test Connection & Mapping` | Step-by-step diagnosis: ss.exe, srcsafe.ini, login, file mapping |
 | `VSS: Show Output Log` | Full log of ss.exe commands (debugging) |
+| `VSS: Set AI API Key` | Key for the ✨ AI check-in comment button (stored encrypted) |
 | `VSS: Open Settings` | Open the extension settings |
 
 ### Keyboard shortcuts

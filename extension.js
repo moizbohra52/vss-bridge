@@ -22,6 +22,7 @@ const { execFileSync } = require('child_process');
 const PKG = require('./package.json');
 const { SsClient, SsError, glDir, lookupListing, dateKey, isSameUser } = require('./lib/ssClient');
 const { HistoryPanel } = require('./lib/historyPanel');
+const { describeChange, buildRequest, generateComment } = require('./lib/aiClient');
 const { mapToVssPath: computeVssPath, normalizeVssProject, searchResultPaths } = require('./lib/vssPaths');
 
 const BRAND = 'Developed by Moiz Bohra';                     // author credit
@@ -57,6 +58,11 @@ function readConfig() {
     statusBarEnabled: cfg.get('statusBarEnabled', true),
     explorerDecorations: cfg.get('explorerDecorations', true),
     explorerRefreshMinutes: cfg.get('explorerRefreshMinutes', 5),
+    ai: {
+      provider: cfg.get('ai.provider', 'openai'),
+      endpoint: (cfg.get('ai.endpoint') || '').trim(),
+      model: (cfg.get('ai.model') || '').trim()
+    },
     workspaceFolder: folder
   };
 }
@@ -608,6 +614,94 @@ async function doCheckout(uri, { silent = false, decided = null } = {}) {
   });
 }
 
+// --------------------------------------------------------------------- //
+//  AI check-in comments                                                 //
+// --------------------------------------------------------------------- //
+
+const AI_KEY_SECRET = 'vssBridge.ai.apiKey';
+const AI_BUTTON = { iconPath: new vscode.ThemeIcon('sparkle'), tooltip: 'Write the comment with AI from your changes' };
+
+/** Ask for the AI API key and keep it in VS Code's encrypted secret storage. */
+async function promptAiKey() {
+  const key = await vscode.window.showInputBox({
+    prompt: 'API key for AI check-in comments (stored encrypted by VS Code). Leave empty for a local model such as Ollama.',
+    password: true,
+    ignoreFocusOut: true
+  });
+  if (key === undefined) { return undefined; }
+  await context.secrets.store(AI_KEY_SECRET, key.trim());
+  return key.trim();
+}
+
+/** AI comment for what changed in `uris` since checkout: the VSS version vs the file on disk. */
+async function aiCheckinComment(uris, key) {
+  const ai = readConfig().ai;
+  buildRequest(ai, key, ''); // settings mistakes surface before the slow VSS reads
+  const changes = await enqueue(async () => {
+    const out = [];
+    for (const uri of uris) {
+      const vssPath = mapToVssPath(uri);
+      const mine = readBytes(uri.fsPath);
+      if (vssPath && mine) {
+        out.push(describeChange(vscode.workspace.asRelativePath(uri), await client.latestContent(vssPath), mine));
+      }
+    }
+    return out.filter(Boolean);
+  });
+  if (!changes.length) { throw new Error('no changes found compared to the VSS version.'); }
+  log(`AI comment: changes of ${changes.length} file(s) sent to ${ai.provider} ${ai.endpoint || '(default endpoint)'}`);
+  return generateComment(ai, key, changes);
+}
+
+/**
+ * The check-in comment box. Resolves like showInputBox (the text, or undefined
+ * when cancelled); its ✨ button has AI write the comment from your changes in `uris`.
+ */
+function askCheckinComment(prompt, uris) {
+  return new Promise((resolve) => {
+    const box = vscode.window.createInputBox();
+    box.title = 'VSS Check In';
+    box.prompt = prompt + ' - or click ✨ to let AI write it';
+    box.placeholder = 'e.g. Fixed null reference in payment module';
+    box.buttons = [AI_BUTTON];
+    box.ignoreFocusOut = true; // the AI takes a few seconds - clicking elsewhere must not cancel the check-in
+    let accepted = false;
+    let askingKey = false;
+    box.onDidChangeValue(() => { box.validationMessage = undefined; });
+    box.onDidAccept(() => { accepted = true; box.hide(); });
+    box.onDidHide(() => {
+      if (askingKey) { return; } // hidden by the API key prompt, shown again after it
+      const value = box.value;
+      box.dispose();
+      resolve(accepted ? value : undefined);
+    });
+    box.onDidTriggerButton(async () => {
+      if (box.busy) { return; }
+      let key = await context.secrets.get(AI_KEY_SECRET);
+      if (key === undefined) {
+        askingKey = true;
+        key = await promptAiKey();
+        askingKey = false;
+        box.show();
+        if (key === undefined) { return; }
+      }
+      box.validationMessage = undefined;
+      box.busy = true;
+      box.enabled = false;
+      try {
+        box.value = await aiCheckinComment(uris, key);
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        log(`!! AI comment failed: ${msg}`);
+        box.validationMessage = `AI could not write the comment: ${msg} Type it yourself, or check the vssBridge.ai settings / "VSS: Set AI API Key".`;
+      }
+      box.busy = false;
+      box.enabled = true;
+    });
+    box.show();
+  });
+}
+
 async function doCheckin(uri) {
   if (!uri) { uri = resolveTargetUri(); }
   if (!uri) { return; }
@@ -738,10 +832,8 @@ async function doCheckin(uri) {
     return;
   }
 
-  const comment = await vscode.window.showInputBox({
-    prompt: `Check-in comment for "${path.basename(uri.fsPath)}" (optional - press Enter to skip)`,
-    placeHolder: 'e.g. Fixed null reference in payment module'
-  });
+  const comment = await askCheckinComment(
+    `Check-in comment for "${path.basename(uri.fsPath)}" (optional - press Enter to skip)`, [uri]);
   if (comment === undefined) { return; } // user cancelled
 
   await enqueue(async () => {
@@ -803,10 +895,7 @@ async function smartCheckoutAndCheckin(uri, vssPath) {
 
   // 2. Ask for the check-in comment BEFORE entering the queue (so the queue
   //    is not stalled while the user is typing).
-  const comment = await vscode.window.showInputBox({
-    prompt: `Check-in comment for "${basename}" (optional - press Enter to skip)`,
-    placeHolder: 'e.g. Fixed null reference in payment module'
-  });
+  const comment = await askCheckinComment(`Check-in comment for "${basename}" (optional - press Enter to skip)`, [uri]);
   if (comment === undefined) { return; } // user cancelled - file untouched
 
   // 3. Atomic checkout -> restore -> checkin (single enqueued job).
@@ -1047,10 +1136,8 @@ async function runBatch(op, uris) {
       const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === x.uri.toString());
       if (doc && doc.isDirty) { await doc.save(); } // VSS checks in what is on disk
     }
-    comment = await vscode.window.showInputBox({
-      prompt: `Check-in comment for ${targets.length} file(s) (optional - press Enter to skip)`,
-      placeHolder: 'e.g. Fixed null reference in payment module'
-    });
+    comment = await askCheckinComment(
+      `Check-in comment for ${targets.length} file(s) (optional - press Enter to skip)`, targets.map(x => x.uri));
     if (comment === undefined) { return; }
   } else if (targets.length && op === 'undo') {
     const choice = await vscode.window.showWarningMessage(
@@ -1546,6 +1633,9 @@ async function activate(ctx) {
   reg('vssBridge.quickMenu', () => showQuickMenu());
   reg('vssBridge.testConnection', (arg) => doTestConnection(resolveTargetUri(arg)));
   reg('vssBridge.showLog', () => doShowLog());
+  reg('vssBridge.setAiKey', async () => {
+    if (await promptAiKey() !== undefined) { vscode.window.showInformationMessage('VSS Bridge: AI API key saved.'); }
+  });
 
   // --- explorer badges ------------------------------------------------
   ctx.subscriptions.push(
