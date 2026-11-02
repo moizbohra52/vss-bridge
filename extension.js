@@ -582,6 +582,7 @@ async function doCheckout(uri, { silent = false, decided = null } = {}) {
   }
 
   const key = uri.toString();
+  let notInVss = false;
   await enqueue(async () => {
     try {
       const before = readBytes(uri.fsPath);
@@ -609,7 +610,37 @@ async function doCheckout(uri, { silent = false, decided = null } = {}) {
           (mine && decision.plan === 'mine' ? ' Your changes were kept.' : ''));
       }
     } catch (err) {
+      // A new local file: offer to add it - asked after this job, so the queue is not held by the dialog.
+      if (err instanceof SsError && err.kind === 'notfound' && fs.existsSync(uri.fsPath)) { notInVss = true; return; }
       handleOperationError(err, uri, vssPath, 'checkout');
+    }
+  });
+  if (notInVss) { await addToVss(uri, vssPath); }
+}
+
+/** Check Out of a file that is not in VSS yet: add it (and its missing VSS folders), checked out to you. */
+async function addToVss(uri, vssPath) {
+  const name = path.basename(uri.fsPath);
+  const choice = await vscode.window.showWarningMessage(
+    `VSS Bridge: "${name}" is not in VSS yet.\n\nAdd it to VSS as ${vssPath}? Missing VSS folders are created too, ` +
+    'and the file stays checked out to you.',
+    { modal: true }, 'Add to VSS', 'Fix Mapping');
+  if (choice === 'Fix Mapping') {
+    await vscode.commands.executeCommand('workbench.action.openSettings', '@id:vssBridge.vssProject @id:vssBridge.mappings');
+  }
+  if (choice !== 'Add to VSS') { return; }
+  await enqueue(async () => {
+    try {
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `VSS: adding ${name}...` },
+        () => client.add(vssPath, uri.fsPath));
+      setReadOnly(uri.fsPath, false);
+      statusCache.delete(uri.toString());
+      refreshBadges(uri);
+      updateStatusBarFor(uri);
+      vscode.window.showInformationMessage(`VSS Bridge: "${name}" added to VSS and checked out - you can edit it now.`);
+    } catch (err) {
+      handleOperationError(err, uri, vssPath, 'add');
     }
   });
 }
@@ -1125,10 +1156,11 @@ async function runBatch(op, uris) {
   const mine = x => { const st = cachedStatus(x.loc); return st ? st.byMe : isWritable(x.uri.fsPath); };
   const inVss = x => { const st = cachedStatus(x.loc); return !st || st.exists; };
   const wanted = op === 'checkin' || op === 'undo' ? mine
-    : op === 'checkout' ? (x => inVss(x) && !mine(x))
+    : op === 'checkout' ? (x => !mine(x))
     : inVss;
   let targets = items.filter(wanted);
   skipped += items.length - targets.length;
+  const added = op === 'checkout' ? targets.filter(x => !inVss(x)) : []; // new local files: ss Add instead
 
   let comment = '';
   if (targets.length && op === 'checkin') {
@@ -1145,8 +1177,19 @@ async function runBatch(op, uris) {
       { modal: true }, 'Undo Checkout');
     if (choice !== 'Undo Checkout') { return; }
   } else if (targets.length) {
-    // checkout / get: ss -I-Y overwrites writable local copies, which may hold edits.
-    const editable = targets.filter(x => isWritable(x.uri.fsPath));
+    if (added.length) {
+      const choice = await vscode.window.showWarningMessage(
+        `${added.length} of ${targets.length} file(s) are not in VSS yet (e.g. ${added[0].loc.vssPath}). ` +
+        'Add them to VSS? Missing VSS folders are created too, and the files stay checked out to you.',
+        { modal: true }, 'Add to VSS', 'Skip New Files');
+      if (!choice) { return; }
+      if (choice === 'Skip New Files') {
+        targets = targets.filter(x => !added.includes(x));
+        skipped += added.length;
+      }
+    }
+    // checkout / get: ss -I-Y overwrites writable local copies, which may hold edits (ss Add does not).
+    const editable = targets.filter(x => !added.includes(x) && isWritable(x.uri.fsPath));
     if (editable.length) {
       const choice = await vscode.window.showWarningMessage(
         `${editable.length} of ${targets.length} file(s) are editable locally and may contain changes. ` +
@@ -1167,6 +1210,7 @@ async function runBatch(op, uris) {
   }
 
   let done = 0;
+  let addedDone = 0;
   const failed = [];
   await enqueue(() => vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `VSS: ${spec.title} (${targets.length} files)`, cancellable: true },
@@ -1175,7 +1219,12 @@ async function runBatch(op, uris) {
         if (token.isCancellationRequested) { break; }
         progress.report({ message: `${i + 1}/${targets.length} ${path.basename(x.uri.fsPath)}`, increment: 100 / targets.length });
         try {
-          await spec.run(x.loc.vssPath, glDir(path.dirname(x.uri.fsPath)), comment.trim());
+          if (added.includes(x)) {
+            await client.add(x.loc.vssPath, x.uri.fsPath);
+            addedDone++;
+          } else {
+            await spec.run(x.loc.vssPath, glDir(path.dirname(x.uri.fsPath)), comment.trim());
+          }
           if (spec.readOnly !== null) { setReadOnly(x.uri.fsPath, spec.readOnly); }
           statusCache.delete(x.uri.toString());
           if (spec.readOnly) { handledDocs.delete(x.uri.toString()); } // next open should ask again
@@ -1192,7 +1241,7 @@ async function runBatch(op, uris) {
   for (const f of new Set(targets.map(x => x.loc.folder))) { loadFolderStatus(f); }
   refreshCheckouts();
   if (vscode.window.activeTextEditor) { updateStatusBarFor(vscode.window.activeTextEditor.document.uri); }
-  const summary = `VSS Bridge: ${done} file(s) ${spec.done}` +
+  const summary = `VSS Bridge: ${done} file(s) ${spec.done}` + (addedDone ? ` (${addedDone} newly added to VSS)` : '') +
     (failed.length ? `, ${failed.length} failed` : '') + (skipped ? `, ${skipped} skipped` : '') + '.';
   if (failed.length) {
     vscode.window.showWarningMessage(summary + ' The output log has the ss.exe errors.', 'Show Output Log')

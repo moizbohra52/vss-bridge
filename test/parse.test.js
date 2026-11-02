@@ -286,6 +286,27 @@ test('SsClient: Checkout and Get replace a writable local copy (-GWR), else ss.e
   assert.ok(seen.every(a => a.includes('-GWR')), JSON.stringify(seen));
 });
 
+test('SsClient.add: creates the missing VSS folders, then adds the file checked out (-K)', async () => {
+  const c = new SsClient({ username: 'moizbohra' });
+  const projects = new Set(['$/', '$/app']);
+  const seen = [];
+  c.exec = async (args) => {
+    seen.push(args);
+    if (args[0] === 'CP' && !projects.has(args[1])) {
+      return { code: 100, timedOut: false, output: `${args[1]} is not an existing filename or project\r\n` };
+    }
+    if (args[0] === 'Create') { projects.add(args[1]); }
+    return { code: 0, timedOut: false, output: '' };
+  };
+  await c.add('$/app/new/sub/a.php', 'C:\\dev\\app\\new\\sub\\a.php');
+  assert.deepStrictEqual(seen.map(a => a.slice(0, 2).join(' ')), [
+    'CP $/app/new/sub', 'CP $/app/new', 'CP $/app',
+    'Create $/app/new', 'CP $/app/new', 'Create $/app/new/sub', 'CP $/app/new/sub',
+    'Add C:\\dev\\app\\new\\sub\\a.php'
+  ]);
+  assert.ok(seen[seen.length - 1].includes('-K'), 'stays checked out to you after the add');
+});
+
 // Fails only on VS Code's Node (24.22): run `ELECTRON_RUN_AS_NODE=1 Code.exe test/parse.test.js` too.
 test('SsClient.latestContent: returns the file although ss Get left it read-only', async () => {
   const fs = require('fs');
