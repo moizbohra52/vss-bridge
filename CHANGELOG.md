@@ -5,6 +5,7 @@ All notable changes to the VSS Bridge extension are documented here.
 ## [Unreleased]
 
 ### Added
+- **`vssBridge.askCheckinComment`** setting: set it to `false` to skip the comment box and check in immediately with an empty comment.
 - **Check Out adds new files to VSS**: checking out a file (or a folder) that is not in VSS yet asks once, then adds it with `ss Add -K` so it stays checked out to you. VSS folders that are missing are created first. The dialog shows the VSS path, so you can catch a wrong mapping before anything is created.
 - **AI check-in comments**: a ✨ button in every check-in comment box (single file, smart check-in, multi-file) writes the comment from what you changed since checkout (VSS version vs your file). Works with OpenAI or any OpenAI-compatible API (OpenRouter, Groq, Ollama, LM Studio...), Anthropic, Azure OpenAI and Google Gemini: settings `vssBridge.ai.provider` / `endpoint` / `model`, key via **VSS: Set AI API Key** (stored encrypted, not in settings.json).
 - **Check Out / Check In all search results**: two buttons at the top of the Search view act on every file in the current results, through the usual multi-file flow (one comment, skips files where the action does not apply).

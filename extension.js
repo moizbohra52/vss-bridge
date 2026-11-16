@@ -689,6 +689,7 @@ async function aiCheckinComment(uris, key) {
  * when cancelled); its ✨ button has AI write the comment from your changes in `uris`.
  */
 function askCheckinComment(prompt, uris) {
+  if (!vscode.workspace.getConfiguration('vssBridge').get('askCheckinComment', true)) { return Promise.resolve(''); }
   return new Promise((resolve) => {
     const box = vscode.window.createInputBox();
     box.title = 'VSS Check In';

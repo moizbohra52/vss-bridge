@@ -89,6 +89,7 @@ After installing, configure the settings once. Open `File > Preferences > Settin
 | `vssBridge.vssProject` | `$/` | The VSS project that corresponds to the workspace folder |
 | `vssBridge.mappings` | `[]` | Per-folder mappings for when the local layout differs from VSS (see example below) |
 | `vssBridge.promptOnOpen` | `true` | View/Checkout prompt when a file is opened |
+| `vssBridge.askCheckinComment` | `true` | Show the comment box on check-in; `false` checks in at once with no comment |
 | `vssBridge.ignoredFileTypes` | (binary list) | Files with these extensions never trigger the prompt |
 | `vssBridge.autoGetWhenMissing` | `true` | If the local file is missing, run Get Latest first |
 | `vssBridge.timeoutSeconds` | `60` | Timeout for every ss.exe operation |

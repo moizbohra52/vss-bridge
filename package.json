@@ -80,6 +80,11 @@
           "default": true,
           "description": "When you open a file, ask 'Check Out or View only?' (Dreamweaver style). Files that are already checked out by you are skipped automatically."
         },
+        "vssBridge.askCheckinComment": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the comment box when checking in. Set to false to check in immediately without a comment (the AI comment button is then not offered)."
+        },
         "vssBridge.ignoredFileTypes": {
           "type": "array",
           "items": {
