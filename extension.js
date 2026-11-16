@@ -23,6 +23,7 @@ const PKG = require('./package.json');
 const { SsClient, SsError, glDir, lookupListing, dateKey, isSameUser } = require('./lib/ssClient');
 const { HistoryPanel } = require('./lib/historyPanel');
 const { describeChange, buildRequest, generateComment } = require('./lib/aiClient');
+const { blame, diffLines, splitLines } = require('./lib/blame');
 const { mapToVssPath: computeVssPath, normalizeVssProject, searchResultPaths } = require('./lib/vssPaths');
 
 const BRAND = 'Developed by Moiz Bohra';                     // author credit
@@ -1097,6 +1098,68 @@ async function doShowHistory(uri) {
   });
 }
 
+// --------------------------------------------------------------------- //
+//  Blame: who last changed each line (toggle, per editor)               //
+// --------------------------------------------------------------------- //
+
+const blameDeco = vscode.window.createTextEditorDecorationType({
+  after: { margin: '0 0 0 3em', color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic' }
+});
+const blameShown = new Set(); // document uris currently showing blame
+const blameCache = new Map(); // vssPath -> { version, lines, owners } of the newest VSS version seen
+
+/** Owners of every line of the newest VSS version, fetching only when a newer version exists. */
+async function blameOf(vssPath, progress, token) {
+  const history = (await client.history(vssPath))
+    .filter(h => !/^labeled/i.test(h.action)) // labels do not change content
+    .sort((x, y) => Number(x.version) - Number(y.version));
+  if (!history.length) { throw new Error('VSS has no versions of this file.'); }
+  const newest = history[history.length - 1].version;
+  const hit = blameCache.get(vssPath);
+  if (hit && hit.version === newest) { return hit; }
+  const versions = [];
+  for (const [i, h] of history.entries()) {
+    if (token.isCancellationRequested) { return undefined; }
+    progress.report({ message: `version ${h.version} (${i + 1}/${history.length})`, increment: 100 / history.length });
+    versions.push(Object.assign({ lines: splitLines((await client.latestContent(vssPath, h.version)).toString('utf8')) }, h));
+  }
+  const entry = { version: newest, lines: versions[versions.length - 1].lines, owners: blame(versions) };
+  blameCache.set(vssPath, entry);
+  return entry;
+}
+
+async function doBlame() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== 'file') { vscode.window.showInformationMessage('VSS Bridge: open a file first.'); return; }
+  const uri = editor.document.uri, key = uri.toString();
+  if (blameShown.has(key)) { blameShown.delete(key); editor.setDecorations(blameDeco, []); return; }
+  const vssPath = mapToVssPath(uri);
+  if (!vssPath) { vscode.window.showErrorMessage('VSS Bridge: this file is outside the mapped workspace folder.'); return; }
+
+  await enqueue(async () => {
+    try {
+      const vss = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `VSS: reading every version of ${path.basename(uri.fsPath)}...`, cancellable: true },
+        (progress, token) => blameOf(vssPath, progress, token));
+      if (!vss) { return; }
+      // Lines you edited since the newest VSS version are yours, not checked in yet.
+      const local = { user: 'you', comment: 'not checked in yet', lines: splitLines(editor.document.getText()) };
+      const owners = diffLines(vss.lines, local.lines).map(i => (i >= 0 ? vss.owners[i] : local));
+      const decos = owners.map((o, line) => ({
+        range: editor.document.lineAt(line).range,
+        renderOptions: { after: { contentText: `${o.user}${o.date ? ', ' + o.date : ''}${o.comment ? ': ' + o.comment.slice(0, 60) : ''}` } },
+        hoverMessage: new vscode.MarkdownString(o.version
+          ? `**${o.user}** · version ${o.version} · ${o.date} ${o.time}\n\n${o.comment || '_(no comment)_'}`
+          : '**you** · not checked in yet')
+      }));
+      editor.setDecorations(blameDeco, decos);
+      blameShown.add(key);
+    } catch (err) {
+      showVssError(err, vssPath);
+    }
+  });
+}
+
 /** Manual trigger of the View/Checkout prompt (context menu / palette). */
 async function doOpenPrompt(uri) {
   if (!uri) { uri = resolveTargetUri(); }
@@ -1582,6 +1645,7 @@ async function showQuickMenu() {
     { label: '$(discard)  Undo Checkout', description: 'Discard local changes and release the lock', cmd: 'vssBridge.undoCheckout' },
     { label: '$(cloud-download)  Get Latest Version', description: 'Refresh local copy from VSS', cmd: 'vssBridge.getLatest' },
     { label: '$(history)  Show History', description: 'All versions with users and comments', cmd: 'vssBridge.history' },
+    { label: '$(person)  Who Changed Each Line', description: 'Blame: user, date and comment next to every line (toggle)', cmd: 'vssBridge.blame' },
     { label: '$(question)  View or Check Out...', description: 'Show the open prompt again', cmd: 'vssBridge.openPrompt' }
   ];
   // branding footer (separator + non-actionable credit row)
@@ -1663,6 +1727,8 @@ async function activate(ctx) {
   reg('vssBridge.checkinSearchResults', () => runOnSearchResults('checkin', doCheckin));
   reg('vssBridge.sortCheckouts', () => pickCheckoutsSort());
   reg('vssBridge.history', (arg) => doShowHistory(resolveTargetUri(arg)));
+  reg('vssBridge.blame', () => doBlame());
+  ctx.subscriptions.push(blameDeco, vscode.workspace.onDidCloseTextDocument((doc) => blameShown.delete(doc.uri.toString())));
   reg('vssBridge.openPrompt', (arg) => doOpenPrompt(resolveTargetUri(arg)));
   reg('vssBridge.refreshStatus', (arg) => {
     const uri = resolveTargetUri(arg);

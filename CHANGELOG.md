@@ -5,6 +5,7 @@ All notable changes to the VSS Bridge extension are documented here.
 ## [Unreleased]
 
 ### Added
+- **Who Changed Each Line (blame)**: `Ctrl+Alt+V` `B`, the editor context menu or the quick menu shows the user, date and comment of the version that last changed every line, with the version and full comment on hover; your own uncommitted edits show as "you, not checked in yet". Built by fetching and diffing every version of the file (VSS has no blame), cached until a newer version is checked in.
 - **`vssBridge.askCheckinComment`** setting: set it to `false` to skip the comment box and check in immediately with an empty comment.
 - **Check Out adds new files to VSS**: checking out a file (or a folder) that is not in VSS yet asks once, then adds it with `ss Add -K` so it stays checked out to you. VSS folders that are missing are created first. The dialog shows the VSS path, so you can catch a wrong mapping before anything is created.
 - **AI check-in comments**: a ✨ button in every check-in comment box (single file, smart check-in, multi-file) writes the comment from what you changed since checkout (VSS version vs your file). Works with OpenAI or any OpenAI-compatible API (OpenRouter, Groq, Ollama, LM Studio...), Anthropic, Azure OpenAI and Google Gemini: settings `vssBridge.ai.provider` / `endpoint` / `model`, key via **VSS: Set AI API Key** (stored encrypted, not in settings.json).

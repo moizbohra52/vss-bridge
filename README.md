@@ -18,6 +18,7 @@ Just like Dreamweaver asks "View or Check Out?" the moment you open a file with 
 | **Undo Checkout** | Discards local changes and releases the lock |
 | **Get Latest Version** | Pulls the newest copy from VSS to your local folder |
 | **Show History** | Detail panel for every version - which user, when, with which comment |
+| **Who Changed Each Line** | Blame like GitHub: user, date and comment shown next to every line, hover for details |
 | **Status Bar** | Shows the VSS state of the active file: `Checked in` / `Checked out (you)` / `Checked out by <user>` |
 | **Read-only View** | "View Only" keeps the Windows read-only attribute on the file, so it cannot be saved by accident |
 | **Explorer badges** | Files checked out in VSS get a ✓ in the Explorer: **green** = checked out by you (parent folders turn green too), **red** = checked out by someone else (hover to see who) |
@@ -261,6 +262,12 @@ Only the folders you have open in the Explorer are read from VSS (one quick `ss 
 
 - **Right-click -> VSS: Show History** - a side panel shows all versions: version number, user, date/time, action and comment
 
+### Who changed each line (blame)
+
+- **Right-click in the editor -> VSS: Who Changed Each Line** (or `Ctrl+Alt+V` `B`). Every line gets the user, date and comment of the version that last changed it, greyed out at the end of the line; hover a line for the version number and the full comment. Lines you edited after the newest VSS version show as **you, not checked in yet**.
+- Run the command again to hide it.
+- VSS has no blame command, so the extension fetches every version of the file once and diffs them. The first time on a file with many versions takes a while (one `ss Get` per version, progress is shown, cancel is possible); after that it is instant until someone checks in a new version.
+
 ### 5. Status bar indicator
 
 At the bottom-left of the editor, the state of the active file:
@@ -287,6 +294,7 @@ Click the status bar -> the quick menu with all VSS actions opens.
 | `VSS: Undo Checkout` | Discard changes and release the lock |
 | `VSS: Get Latest Version` | Pull the latest copy from VSS |
 | `VSS: Show History` | Open the history panel |
+| `VSS: Who Changed Each Line (Blame)` | Toggle user/date/comment next to every line of the active file |
 | `VSS: View or Check Out...` | Show the open prompt again |
 | `VSS: Actions for This File...` | The quick menu of the status bar |
 | `VSS: Refresh Status` | Re-read the status bar, Explorer badges and VSS Checkouts view from VSS |
@@ -306,6 +314,7 @@ Press `Ctrl+Alt+V`, let go, then press the second key. File commands work on the
 | `Ctrl+Alt+V` `U` | Undo Checkout |
 | `Ctrl+Alt+V` `G` | Get Latest Version |
 | `Ctrl+Alt+V` `H` | Show History |
+| `Ctrl+Alt+V` `B` | Who Changed Each Line (blame, toggle) |
 | `Ctrl+Alt+V` `P` | View or Check Out... (the open prompt) |
 | `Ctrl+Alt+V` `M` | Check In My Checkouts... |
 | `Ctrl+Alt+V` `Shift+O` | Check Out All Search Results |
